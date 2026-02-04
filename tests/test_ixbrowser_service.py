@@ -1,0 +1,246 @@
+import pytest
+
+from app.models.ixbrowser import (
+    IXBrowserGenerateRequest,
+    IXBrowserGroupWindows,
+    IXBrowserSessionScanItem,
+    IXBrowserSessionScanResponse,
+    IXBrowserWindow,
+)
+from app.services.ixbrowser_service import IXBrowserAPIError, IXBrowserNotFoundError, IXBrowserService, IXBrowserServiceError
+
+pytestmark = pytest.mark.unit
+
+
+class _FakeBrowser:
+    def __init__(self):
+        self.contexts = []
+
+    async def close(self):
+        return None
+
+
+class _FakeChromium:
+    async def connect_over_cdp(self, *_args, **_kwargs):
+        return _FakeBrowser()
+
+
+class _FakePlaywright:
+    def __init__(self):
+        self.chromium = _FakeChromium()
+
+
+class _FakePlaywrightContext:
+    async def __aenter__(self):
+        return _FakePlaywright()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_scan_group_sora_sessions_group_not_found():
+    service = IXBrowserService()
+
+    async def _fake_list_group_windows():
+        return []
+
+    service.list_group_windows = _fake_list_group_windows
+
+    with pytest.raises(IXBrowserNotFoundError):
+        await service.scan_group_sora_sessions(group_title="Sora")
+
+
+@pytest.mark.asyncio
+async def test_scan_group_sora_sessions_collects_results(monkeypatch):
+    service = IXBrowserService()
+
+    async def _fake_list_group_windows():
+        return [
+            IXBrowserGroupWindows(
+                id=1,
+                title="Sora",
+                window_count=2,
+                windows=[
+                    IXBrowserWindow(profile_id=11, name="win-11"),
+                    IXBrowserWindow(profile_id=12, name="win-12"),
+                ],
+            )
+        ]
+
+    async def _fake_open_profile(profile_id, restart_if_opened=False):
+        return {"ws": f"ws://127.0.0.1/mock-{profile_id}"}
+
+    async def _fake_close_profile(_profile_id):
+        return True
+
+    responses = [
+        (200, {"user": {"email": "first@example.com"}}, '{"ok":true}'),
+        (401, {"error": "unauthorized"}, '{"error":"unauthorized"}'),
+    ]
+    quota_responses = [
+        {
+            "remaining_count": 8,
+            "total_count": 8,
+            "reset_at": "2026-02-05T00:00:00+00:00",
+            "source": "https://sora.chatgpt.com/backend/nf/check",
+            "payload": {"ok": True},
+            "error": None,
+        },
+        {
+            "remaining_count": None,
+            "total_count": None,
+            "reset_at": None,
+            "source": "https://sora.chatgpt.com/backend/nf/check",
+            "payload": None,
+            "error": "nf/check 状态码 401",
+        },
+    ]
+
+    async def _fake_fetch_sora_session(_browser):
+        return responses.pop(0)
+
+    async def _fake_fetch_sora_quota(_browser, _session_obj=None):
+        return quota_responses.pop(0)
+
+    service.list_group_windows = _fake_list_group_windows
+    service._open_profile = _fake_open_profile
+    service._close_profile = _fake_close_profile
+    service._fetch_sora_session = _fake_fetch_sora_session
+    service._fetch_sora_quota = _fake_fetch_sora_quota
+    service._save_scan_response = lambda *_args, **_kwargs: 101
+
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.async_playwright",
+        lambda: _FakePlaywrightContext(),
+    )
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
+        lambda _run_id: {"scanned_at": "2026-02-04 12:00:00"},
+    )
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.update_ixbrowser_scan_run_fallback_count",
+        lambda _run_id, _count: True,
+    )
+    service._apply_fallback_from_history = lambda _response: None
+
+    result = await service.scan_group_sora_sessions(group_title="Sora")
+
+    assert result.group_title == "Sora"
+    assert result.total_windows == 2
+    assert result.success_count == 1
+    assert result.failed_count == 1
+    assert result.run_id == 101
+    assert result.results[0].account == "first@example.com"
+    assert result.results[0].success is True
+    assert result.results[1].success is False
+    assert result.results[0].close_success is True
+    assert result.results[1].close_success is True
+    assert result.results[0].quota_remaining_count == 8
+    assert result.results[0].quota_error is None
+    assert result.results[1].quota_error == "nf/check 状态码 401"
+
+
+def test_parse_sora_nf_check_payload():
+    service = IXBrowserService()
+    payload = {
+        "rate_limit_and_credit_balance": {
+            "estimated_num_videos_remaining": 12,
+            "estimated_num_purchased_videos_remaining": 2,
+            "access_resets_in_seconds": 3600,
+        }
+    }
+
+    parsed = service._parse_sora_nf_check(payload)
+
+    assert parsed["remaining_count"] == 12
+    assert parsed["total_count"] == 14
+    assert parsed["reset_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_close_profile_treats_1009_as_success():
+    service = IXBrowserService()
+
+    async def _fake_post(_path, _payload):
+        raise IXBrowserAPIError(1009, "Process not found")
+
+    service._post = _fake_post
+
+    ok = await service._close_profile(123)
+    assert ok is True
+
+
+def test_apply_fallback_from_history(monkeypatch):
+    service = IXBrowserService()
+    response = IXBrowserSessionScanResponse(
+        run_id=12,
+        scanned_at="2026-02-04 12:00:00",
+        group_id=1,
+        group_title="Sora",
+        total_windows=1,
+        success_count=0,
+        failed_count=1,
+        results=[
+            IXBrowserSessionScanItem(
+                profile_id=88,
+                window_name="win-88",
+                group_id=1,
+                group_title="Sora",
+                success=False,
+            )
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_latest_success_results_before_run",
+        lambda group_title, before_run_id: [
+            {
+                "profile_id": 88,
+                "run_id": 11,
+                "run_scanned_at": "2026-02-04 11:00:00",
+                "account": "fallback@example.com",
+                "quota_remaining_count": 9,
+                "quota_reset_at": "2026-02-05 00:00:00",
+            }
+        ],
+    )
+
+    service._apply_fallback_from_history(response)
+
+    assert response.fallback_applied_count == 1
+    assert response.results[0].account == "fallback@example.com"
+    assert response.results[0].quota_remaining_count == 9
+    assert response.results[0].fallback_applied is True
+    assert response.results[0].fallback_run_id == 11
+
+
+@pytest.mark.asyncio
+async def test_create_sora_generate_job_requires_sora_window():
+    service = IXBrowserService()
+
+    async def _fake_get_window(_profile_id):
+        return None
+
+    service._get_window_from_sora_group = _fake_get_window
+    req = IXBrowserGenerateRequest(
+        profile_id=100,
+        prompt="test prompt",
+        duration="10s",
+        aspect_ratio="landscape",
+    )
+    with pytest.raises(IXBrowserNotFoundError):
+        await service.create_sora_generate_job(req, operator_user={"id": 1, "username": "admin"})
+
+
+@pytest.mark.asyncio
+async def test_create_sora_generate_job_validates_duration():
+    service = IXBrowserService()
+    req = IXBrowserGenerateRequest(
+        profile_id=1,
+        prompt="test prompt",
+        duration="20s",
+        aspect_ratio="landscape",
+    )
+    with pytest.raises(IXBrowserServiceError):
+        await service.create_sora_generate_job(req, operator_user={"id": 1, "username": "admin"})
