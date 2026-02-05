@@ -92,6 +92,7 @@ class IXBrowserGenerateJob(BaseModel):
     published_at: Optional[str] = None
     task_id: Optional[str] = None
     task_url: Optional[str] = None
+    generation_id: Optional[str] = None
     error: Optional[str] = None
     elapsed_ms: Optional[int] = None
     started_at: Optional[str] = None

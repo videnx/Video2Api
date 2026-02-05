@@ -524,6 +524,7 @@ class IXBrowserService:
                 timeout_seconds=self.generate_timeout_seconds,
                 poll_interval_seconds=self.generate_poll_interval_seconds,
                 job_id=job_id,
+                created_after=started_at,
             )
 
             status = "completed" if final.get("status") == "completed" else "failed"
@@ -586,6 +587,7 @@ class IXBrowserService:
         timeout_seconds: int,
         poll_interval_seconds: int,
         job_id: int,
+        created_after: Optional[str] = None,
     ) -> Dict[str, Any]:
         duration_to_frames = {
             "10s": 300,
@@ -723,6 +725,12 @@ class IXBrowserService:
                             "progress": progress,
                         }
                     )
+                    generation_id = state.get("generation_id")
+                    if isinstance(generation_id, str) and generation_id.strip():
+                        sqlite_db.update_ixbrowser_generate_job(
+                            job_id,
+                            {"generation_id": generation_id.strip()},
+                        )
 
                     maybe_url = state.get("task_url")
                     if maybe_url:
@@ -736,6 +744,7 @@ class IXBrowserService:
                                 page=page,
                                 task_id=task_id,
                                 prompt=prompt,
+                                created_after=created_after,
                             )
                         except Exception as publish_exc:  # noqa: BLE001
                             publish_error = str(publish_exc)
@@ -837,6 +846,7 @@ class IXBrowserService:
                     task_id=task_id,
                     task_url=task_url,
                     prompt=prompt,
+                    created_after=str(row.get("started_at") or row.get("created_at") or ""),
                 )
                 if publish_url:
                     sqlite_db.update_ixbrowser_generate_job(
@@ -876,6 +886,7 @@ class IXBrowserService:
         task_id: Optional[str],
         task_url: Optional[str],
         prompt: str,
+        created_after: Optional[str] = None,
     ) -> Optional[str]:
         open_data = await self._open_profile_with_retry(profile_id, max_attempts=2)
         ws_endpoint = open_data.get("ws")
@@ -899,7 +910,9 @@ class IXBrowserService:
                 await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
                 await page.wait_for_timeout(1500)
 
-                draft_data = await self._fetch_draft_item(page, task_id=task_id, prompt=prompt)
+                draft_data = await self._fetch_draft_item(
+                    page, task_id=task_id, prompt=prompt, created_after=created_after
+                )
                 if isinstance(draft_data, dict):
                     existing_link = self._extract_publish_url(str(draft_data))
                     if existing_link:
@@ -922,6 +935,7 @@ class IXBrowserService:
                     task_id=task_id,
                     prompt=prompt,
                     device_id=device_id,
+                    created_after=created_after,
                 )
                 if api_publish.get("publish_url"):
                     return api_publish["publish_url"]
@@ -955,13 +969,16 @@ class IXBrowserService:
         page,
         task_id: Optional[str],
         prompt: str,
+        created_after: Optional[str] = None,
     ) -> Optional[str]:
         publish_future = self._watch_publish_url(page)
 
         await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
         await page.wait_for_timeout(1500)
 
-        draft_data = await self._fetch_draft_item(page, task_id=task_id, prompt=prompt)
+        draft_data = await self._fetch_draft_item(
+            page, task_id=task_id, prompt=prompt, created_after=created_after
+        )
         if isinstance(draft_data, dict):
             existing_link = self._extract_publish_url(str(draft_data))
             if existing_link:
@@ -984,6 +1001,7 @@ class IXBrowserService:
             task_id=task_id,
             prompt=prompt,
             device_id=device_id,
+            created_after=created_after,
         )
         if api_publish.get("publish_url"):
             return api_publish["publish_url"]
@@ -1013,7 +1031,9 @@ class IXBrowserService:
             if "sora.chatgpt.com" not in url:
                 return
             if "/p/" in url:
-                future.set_result(url)
+                found = self._extract_publish_url(url)
+                if found:
+                    future.set_result(found)
                 return
             try:
                 text = await response.text()
@@ -1037,7 +1057,10 @@ class IXBrowserService:
             return None
         match = re.search(r"https?://sora\\.chatgpt\\.com/p/s_[a-zA-Z0-9]{8,}", text)
         if match:
-            return match.group(0)
+            url = match.group(0)
+            if self._is_valid_publish_url(url):
+                return url
+            return None
         share_id = self._extract_share_id(text)
         if share_id:
             return f"https://sora.chatgpt.com/p/{share_id}"
@@ -1054,24 +1077,32 @@ class IXBrowserService:
         if not text:
             return None
         match = re.search(r"s_[a-zA-Z0-9]{8,}", text)
-        return match.group(0) if match else None
+        if not match:
+            return None
+        value = match.group(0)
+        if not re.search(r"\\d", value):
+            return None
+        return value
 
     def _is_valid_publish_url(self, url: Optional[str]) -> bool:
         if not url:
             return False
-        return bool(re.search(r"https?://sora\\.chatgpt\\.com/p/s_[a-zA-Z0-9]{8,}", url))
+        if not re.search(r"https?://sora\\.chatgpt\\.com/p/s_[a-zA-Z0-9]{8,}", url):
+            return False
+        share_id = url.rsplit("/p/", 1)[-1]
+        return bool(re.search(r"\\d", share_id))
 
     def _find_share_id(self, data: Any) -> Optional[str]:
         if data is None:
             return None
         if isinstance(data, str):
-            if re.fullmatch(r"s_[a-zA-Z0-9]{8,}", data):
+            if re.fullmatch(r"s_[a-zA-Z0-9]{8,}", data) and re.search(r"\\d", data):
                 return data
             return None
         if isinstance(data, dict):
             for key in ("share_id", "shareId", "public_id", "publicId", "publish_id", "publishId", "id"):
                 value = data.get(key)
-                if isinstance(value, str) and re.fullmatch(r"s_[a-zA-Z0-9]{8,}", value):
+                if isinstance(value, str) and re.fullmatch(r"s_[a-zA-Z0-9]{8,}", value) and re.search(r"\\d", value):
                     return value
             for value in data.values():
                 found = self._find_share_id(value)
@@ -1116,43 +1147,156 @@ class IXBrowserService:
         page,
         task_id: Optional[str],
         prompt: str,
+        created_after: Optional[str] = None,
     ) -> Optional[dict]:
         data = await page.evaluate(
             """
-            async ({taskId, prompt}) => {
+            async ({taskId, prompt, createdAfter}) => {
               try {
-                const resp = await fetch("https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=30", {
-                  method: "GET",
-                  credentials: "include"
-                });
-                const text = await resp.text();
-                let json = null;
-                try { json = JSON.parse(text); } catch (e) {}
-                const items = json?.items;
-                if (!Array.isArray(items)) return null;
-                const norm = (v) => (v || '').toString().toLowerCase();
+                const baseUrl = "https://sora.chatgpt.com/backend/project_y/profile/drafts";
+                const limit = 60;
+                const maxPages = 6;
+                const norm = (v) => (v || '').toString().trim().toLowerCase();
                 const taskIdNorm = norm(taskId);
                 const promptNorm = norm(prompt);
-                let found = null;
-                if (taskIdNorm) {
-                  found = items.find((item) => norm(item?.task_id) === taskIdNorm);
+                const parseTime = (value) => {
+                  if (!value) return null;
+                  let raw = value;
+                  if (typeof raw === 'string' && raw.includes(' ') && !raw.includes('T')) {
+                    raw = raw.replace(' ', 'T');
+                  }
+                  const ts = Date.parse(raw);
+                  return Number.isFinite(ts) ? ts : null;
+                };
+                const targetTime = createdAfter ? parseTime(createdAfter) : null;
+                const pickText = (item) => {
+                  const candidates = [
+                    item?.prompt,
+                    item?.title,
+                    item?.name,
+                    item?.caption,
+                    item?.input?.prompt,
+                    item?.request?.prompt,
+                    item?.generation?.prompt,
+                    item?.task?.prompt
+                  ];
+                  for (const v of candidates) {
+                    if (typeof v === 'string' && v.trim()) return v;
+                  }
+                  return '';
+                };
+                const scoreItem = (item) => {
+                  if (!item || typeof item !== 'object') return 0;
+                  let score = 0;
+                  const itemTask = norm(item?.task_id || item?.taskId || item?.task?.id || item?.task?.task_id);
+                  if (taskIdNorm) {
+                    if (itemTask === taskIdNorm) score += 1000;
+                    else if (itemTask && itemTask.includes(taskIdNorm)) score += 600;
+                  }
+                  const text = norm(pickText(item));
+                  if (promptNorm && text) {
+                    if (text === promptNorm) score += 400;
+                    else if (text.includes(promptNorm) || promptNorm.includes(text)) score += 250;
+                  }
+                  if (promptNorm && score < 200) {
+                    try {
+                      const blob = JSON.stringify(item).toLowerCase();
+                      if (blob.includes(promptNorm)) score += 150;
+                    } catch (e) {}
+                  }
+                  const genId = item?.generation_id || item?.generationId || item?.generation?.id || item?.generation?.generation_id;
+                  if (genId) score += 20;
+                  const created = parseTime(item?.created_at || item?.createdAt || item?.created || item?.updated_at || item?.updatedAt);
+                  if (targetTime && created) {
+                    const diff = Math.abs(created - targetTime);
+                    if (diff <= 5 * 60 * 1000) score += 80;
+                    else if (diff <= 30 * 60 * 1000) score += 30;
+                  }
+                  return score;
+                };
+
+                let best = null;
+                let bestScore = 0;
+                let cursor = null;
+                for (let page = 0; page < maxPages; page += 1) {
+                  const url = cursor
+                    ? `${baseUrl}?limit=${limit}&cursor=${encodeURIComponent(cursor)}`
+                    : `${baseUrl}?limit=${limit}`;
+                  const resp = await fetch(url, { method: "GET", credentials: "include" });
+                  const text = await resp.text();
+                  let json = null;
+                  try { json = JSON.parse(text); } catch (e) {}
+                  const items = json?.items || json?.data || [];
+                  if (!Array.isArray(items)) break;
+                  for (const item of items) {
+                    const score = scoreItem(item);
+                    if (score > bestScore) {
+                      bestScore = score;
+                      best = item;
+                    }
+                    if (score >= 1000) return item;
+                  }
+                  const nextCursor = json?.next_cursor || json?.nextCursor || json?.cursor || null;
+                  const nextUrl = typeof json?.next === "string" ? json.next : null;
+                  if (nextUrl) {
+                    cursor = nextUrl;
+                  } else if (nextCursor) {
+                    cursor = nextCursor;
+                  } else if (json?.has_more) {
+                    cursor = String(page + 1);
+                  } else {
+                    break;
+                  }
+                  if (cursor && cursor.startsWith("http")) {
+                    const next = cursor;
+                    cursor = null;
+                    const resp2 = await fetch(next, { method: "GET", credentials: "include" });
+                    const text2 = await resp2.text();
+                    let json2 = null;
+                    try { json2 = JSON.parse(text2); } catch (e) {}
+                    const items2 = json2?.items || json2?.data || [];
+                    if (Array.isArray(items2)) {
+                      for (const item of items2) {
+                        const score = scoreItem(item);
+                        if (score > bestScore) {
+                          bestScore = score;
+                          best = item;
+                        }
+                        if (score >= 1000) return item;
+                      }
+                    }
+                    const nextCursor2 = json2?.next_cursor || json2?.nextCursor || json2?.cursor || null;
+                    cursor = nextCursor2 || null;
+                  }
                 }
-                if (!found && promptNorm) {
-                  found = items.find((item) => norm(item?.prompt || item?.title || item?.name).includes(promptNorm));
-                }
-                return found || items[0] || null;
+
+                return bestScore >= 150 ? best : null;
               } catch (e) {
                 return null;
               }
             }
             """,
-            {"taskId": task_id, "prompt": prompt}
+            {"taskId": task_id, "prompt": prompt, "createdAfter": created_after}
         )
         return data if isinstance(data, dict) else None
+
+    def _extract_generation_id(self, item: Optional[dict]) -> Optional[str]:
+        if not isinstance(item, dict):
+            return None
+        generation_id = item.get("generation_id") or item.get("generationId")
+        if not generation_id and isinstance(item.get("generation"), dict):
+            generation_id = item.get("generation", {}).get("id") or item.get("generation", {}).get("generation_id")
+        if isinstance(generation_id, str) and generation_id.strip():
+            return generation_id.strip()
+        return None
 
     def _resolve_draft_url_from_item(self, item: dict, task_id: Optional[str]) -> Optional[str]:
         if not item:
             return None
+        generation_id = self._extract_generation_id(item)
+        if isinstance(generation_id, str) and generation_id.strip():
+            if generation_id.startswith("gen_"):
+                return f"https://sora.chatgpt.com/d/{generation_id}"
         for key in ("share_url", "public_url", "publish_url", "url"):
             value = item.get(key)
             if isinstance(value, str) and value.strip():
@@ -1163,6 +1307,8 @@ class IXBrowserService:
         for key in ("id", "draft_id", "project_id", "video_id", "asset_id"):
             value = item.get(key)
             if isinstance(value, str) and value.strip():
+                if value.startswith("gen_"):
+                    return f"https://sora.chatgpt.com/d/{value}"
                 return f"https://sora.chatgpt.com/g/{value}"
         if task_id:
             return f"https://sora.chatgpt.com/g/{task_id}"
@@ -1620,17 +1766,15 @@ class IXBrowserService:
         task_id: Optional[str],
         prompt: str,
         device_id: str,
+        created_after: Optional[str] = None,
     ) -> Dict[str, Optional[str]]:
-        draft_data = await self._fetch_draft_item(page, task_id=task_id, prompt=prompt)
+        draft_data = await self._fetch_draft_item(
+            page, task_id=task_id, prompt=prompt, created_after=created_after
+        )
         if not isinstance(draft_data, dict):
             return {"publish_url": None, "error": "未找到草稿数据"}
 
-        generation_id = (
-            draft_data.get("generation_id")
-            or draft_data.get("generationId")
-            or (draft_data.get("generation") or {}).get("id")
-            or (draft_data.get("generation") or {}).get("generation_id")
-        )
+        generation_id = self._extract_generation_id(draft_data)
         if not generation_id:
             return {"publish_url": None, "error": "草稿缺少 generation_id"}
 
@@ -1759,6 +1903,11 @@ class IXBrowserService:
                 const kind = target.kind || "";
                 const taskUrl = target.url || target.downloadable_url || null;
                 const progress = pickProgress(target);
+                const generationId = target?.generation_id
+                  || target?.generationId
+                  || target?.generation?.id
+                  || target?.generation?.generation_id
+                  || null;
                 if (reason && String(reason).trim()) {
                   return fail(String(reason), progress);
                 }
@@ -1766,9 +1915,9 @@ class IXBrowserService:
                   return fail("内容审核未通过", progress);
                 }
                 if (taskUrl) {
-                  return { state: "completed", error: null, task_url: taskUrl, progress: 100 };
+                  return { state: "completed", error: null, task_url: taskUrl, progress: 100, generation_id: generationId };
                 }
-                return { state: "processing", error: null, task_url: null, progress };
+                return { state: "processing", error: null, task_url: null, progress, generation_id: generationId };
               } catch (e) {
                 return fail(String(e));
               }
@@ -1789,6 +1938,7 @@ class IXBrowserService:
             "error": data.get("error"),
             "task_url": data.get("task_url"),
             "progress": data.get("progress"),
+            "generation_id": data.get("generation_id"),
         }
 
     def _normalize_progress(self, value: Any) -> Optional[int]:
@@ -1877,6 +2027,7 @@ class IXBrowserService:
             published_at=row.get("published_at"),
             task_id=row.get("task_id"),
             task_url=row.get("task_url"),
+            generation_id=row.get("generation_id"),
             error=row.get("error"),
             elapsed_ms=row.get("elapsed_ms"),
             started_at=row.get("started_at"),
@@ -2122,7 +2273,20 @@ class IXBrowserService:
                 # 1009 常见于窗口状态与本地进程状态短暂不一致，先尝试关闭再重开。
                 await self._close_profile(profile_id)
                 await asyncio.sleep(1.0)
-                data = await self._post("/api/v2/profile-open", payload)
+                last_error = None
+                for attempt in range(3):
+                    try:
+                        data = await self._post("/api/v2/profile-open", payload)
+                        last_error = None
+                        break
+                    except IXBrowserAPIError as retry_exc:
+                        last_error = retry_exc
+                        if retry_exc.code == 111003 and attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        raise
+                if last_error is not None:
+                    raise last_error
             else:
                 raise
         result = data.get("data", {})
@@ -2197,6 +2361,10 @@ class IXBrowserService:
         except IXBrowserAPIError as exc:
             # 1009: Process not found，说明进程已不存在，按“已关闭”处理即可。
             if exc.code == 1009 or "process not found" in exc.message.lower():
+                try:
+                    await self._post("/api/v2/profile-close-in-batches", {"profile_id": [profile_id]})
+                except Exception:  # noqa: BLE001
+                    pass
                 return True
             raise
         return True

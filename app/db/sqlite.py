@@ -155,6 +155,10 @@ class SQLiteDB:
             cursor.execute(
                 "ALTER TABLE ixbrowser_sora_generate_jobs ADD COLUMN published_at TIMESTAMP"
             )
+        if "generation_id" not in columns:
+            cursor.execute(
+                "ALTER TABLE ixbrowser_sora_generate_jobs ADD COLUMN generation_id TEXT"
+            )
 
         conn.commit()
         conn.close()
