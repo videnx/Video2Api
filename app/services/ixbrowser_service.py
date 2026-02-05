@@ -100,6 +100,8 @@ class IXBrowserService:
     scan_history_limit = 10
     generate_timeout_seconds = 30 * 60
     generate_poll_interval_seconds = 6
+    draft_wait_timeout_seconds = 20 * 60
+    draft_manual_poll_interval_seconds = 5 * 60
     ixbrowser_busy_retry_max = 6
     ixbrowser_busy_retry_delay_seconds = 1.2
     sora_blocked_resource_types = {"image", "media", "font"}
@@ -610,6 +612,8 @@ class IXBrowserService:
         reconnect_attempts = 0
         max_reconnect_attempts = 3
         last_progress = 0
+        last_draft_fetch_at = 0.0
+        generation_id: Optional[str] = None
         browser = None
         page = None
         task_id: Optional[str] = None
@@ -689,10 +693,16 @@ class IXBrowserService:
 
                     poll_attempts += 1
                     try:
+                        fetch_drafts = False
+                        now = time.perf_counter()
+                        if not generation_id and (now - last_draft_fetch_at) >= self.draft_manual_poll_interval_seconds:
+                            fetch_drafts = True
+                            last_draft_fetch_at = now
                         state = await self._poll_sora_task_from_page(
                             page=page,
                             task_id=task_id,
                             access_token=access_token,
+                            fetch_drafts=fetch_drafts,
                         )
                     except Exception as poll_exc:  # noqa: BLE001
                         if self._is_page_closed_error(poll_exc) and reconnect_attempts < max_reconnect_attempts:
@@ -725,11 +735,12 @@ class IXBrowserService:
                             "progress": progress,
                         }
                     )
-                    generation_id = state.get("generation_id")
-                    if isinstance(generation_id, str) and generation_id.strip():
+                    state_generation_id = state.get("generation_id")
+                    if isinstance(state_generation_id, str) and state_generation_id.strip():
+                        generation_id = state_generation_id.strip()
                         sqlite_db.update_ixbrowser_generate_job(
                             job_id,
-                            {"generation_id": generation_id.strip()},
+                            {"generation_id": generation_id},
                         )
 
                     maybe_url = state.get("task_url")
@@ -911,7 +922,9 @@ class IXBrowserService:
                 await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
                 await page.wait_for_timeout(1500)
 
-                draft_data = await self._wait_for_draft_item(draft_future, timeout_seconds=12)
+                draft_data = await self._wait_for_draft_item(
+                    draft_future, timeout_seconds=self.draft_wait_timeout_seconds
+                )
                 generation_id = None
                 if isinstance(draft_data, dict):
                     existing_link = self._extract_publish_url(str(draft_data))
@@ -919,13 +932,14 @@ class IXBrowserService:
                         return existing_link
                     generation_id = self._extract_generation_id(draft_data)
                     if isinstance(generation_id, str) and generation_id.strip() and generation_id.startswith("gen_"):
-                        draft_url = f"https://sora.chatgpt.com/d/{generation_id}"
-                    else:
-                        draft_url = self._resolve_draft_url_from_item(draft_data, task_id)
-                    if draft_url:
-                        await page.goto(draft_url, wait_until="domcontentloaded", timeout=40_000)
+                        await page.goto(
+                            f"https://sora.chatgpt.com/d/{generation_id}",
+                            wait_until="domcontentloaded",
+                            timeout=40_000,
+                        )
                         await page.wait_for_timeout(1200)
-                else:
+
+                if not generation_id:
                     clicked = await self._open_draft_from_list(page, task_id=task_id, prompt=prompt)
                     if clicked:
                         try:
@@ -936,6 +950,8 @@ class IXBrowserService:
                 await page.wait_for_timeout(800)
                 if not generation_id:
                     generation_id = self._extract_generation_id_from_url(page.url)
+                if not generation_id:
+                    raise IXBrowserServiceError("20分钟内未捕获generation_id")
                 await self._clear_caption_input(page)
                 device_id = await self._get_device_id_from_context(context)
                 api_publish = await self._publish_sora_post_from_page(
@@ -986,7 +1002,9 @@ class IXBrowserService:
         await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
         await page.wait_for_timeout(1500)
 
-        draft_data = await self._wait_for_draft_item(draft_future, timeout_seconds=12)
+        draft_data = await self._wait_for_draft_item(
+            draft_future, timeout_seconds=self.draft_wait_timeout_seconds
+        )
         generation_id = None
         if isinstance(draft_data, dict):
             existing_link = self._extract_publish_url(str(draft_data))
@@ -994,13 +1012,14 @@ class IXBrowserService:
                 return existing_link
             generation_id = self._extract_generation_id(draft_data)
             if isinstance(generation_id, str) and generation_id.strip() and generation_id.startswith("gen_"):
-                draft_url = f"https://sora.chatgpt.com/d/{generation_id}"
-            else:
-                draft_url = self._resolve_draft_url_from_item(draft_data, task_id)
-            if draft_url:
-                await page.goto(draft_url, wait_until="domcontentloaded", timeout=40_000)
+                await page.goto(
+                    f"https://sora.chatgpt.com/d/{generation_id}",
+                    wait_until="domcontentloaded",
+                    timeout=40_000,
+                )
                 await page.wait_for_timeout(1200)
-        else:
+
+        if not generation_id:
             clicked = await self._open_draft_from_list(page, task_id=task_id, prompt=prompt)
             if clicked:
                 try:
@@ -1011,6 +1030,8 @@ class IXBrowserService:
         await page.wait_for_timeout(800)
         if not generation_id:
             generation_id = self._extract_generation_id_from_url(page.url)
+        if not generation_id:
+            raise IXBrowserServiceError("20分钟内未捕获generation_id")
         await self._clear_caption_input(page)
         device_id = await self._get_device_id_from_context(page.context)
         api_publish = await self._publish_sora_post_from_page(
@@ -1526,7 +1547,8 @@ class IXBrowserService:
               const normalize = (text) => (text || '').toString().toLowerCase();
               const promptText = normalize(prompt);
               const taskText = normalize(taskId);
-              const anchors = Array.from(document.querySelectorAll('a[href*=\"/g/\"], a[href*=\"/draft\"], a[href*=\"/d/\"]'));
+              const anchors = Array.from(document.querySelectorAll('a[href*=\"/draft\"], a[href*=\"/d/\"]'))
+                .filter((node) => !normalize(node.getAttribute('href')).includes('/g/'));
               const pickAnchor = () => {
                 if (taskText) {
                   const hit = anchors.find((node) => normalize(node.getAttribute('href')).includes(taskText));
@@ -2046,14 +2068,19 @@ class IXBrowserService:
         page,
         task_id: str,
         access_token: str,
+        fetch_drafts: bool = False,
     ) -> Dict[str, Any]:
         data = await page.evaluate(
             """
-            async ({taskId, accessToken}) => {
+            async ({taskId, accessToken, fetchDrafts}) => {
               const headers = {
                 "Authorization": `Bearer ${accessToken}`,
                 "Accept": "application/json"
               };
+              try {
+                const didMatch = document.cookie.match(/(?:^|; )oai-did=([^;]+)/);
+                if (didMatch && didMatch[1]) headers["OAI-Device-Id"] = decodeURIComponent(didMatch[1]);
+              } catch (e) {}
               const pickProgress = (obj) => {
                 if (!obj) return null;
                 return obj.progress ?? obj.progress_percent ?? obj.progress_percentage ?? obj.percent ?? obj.pct ?? obj.progressPct ?? null;
@@ -2077,8 +2104,12 @@ class IXBrowserService:
                 }
               } catch (e) {}
 
+              if (!fetchDrafts) {
+                return { state: "processing", error: null, task_url: null, progress: null };
+              }
+
               try {
-                const draftsResp = await fetch("https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=30", {
+                const draftsResp = await fetch("https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=15", {
                   method: "GET",
                   credentials: "include",
                   headers
@@ -2090,7 +2121,22 @@ class IXBrowserService:
                 if (!Array.isArray(items)) {
                   return { state: "processing", error: null, task_url: null };
                 }
-                const target = items.find((item) => item?.task_id === taskId);
+                const normalizeTask = (value) => {
+                  const v = (value || '').toString().toLowerCase();
+                  return v.startsWith('task_') ? v.slice(5) : v;
+                };
+                const taskNorm = normalizeTask(taskId);
+                const target = items.find((item) => {
+                  const itemTask = item?.task_id
+                    || item?.taskId
+                    || item?.task?.id
+                    || item?.task?.task_id
+                    || item?.id
+                    || item?.generation?.task_id
+                    || item?.generation?.taskId;
+                  const itemNorm = normalizeTask(itemTask);
+                  return itemNorm && itemNorm === taskNorm;
+                });
                 if (!target) {
                   return { state: "processing", error: null, task_url: null, progress: null };
                 }
@@ -2130,6 +2176,7 @@ class IXBrowserService:
             {
                 "taskId": task_id,
                 "accessToken": access_token,
+                "fetchDrafts": fetch_drafts,
             }
         )
         if not isinstance(data, dict):
