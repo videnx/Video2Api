@@ -112,7 +112,7 @@
             <el-button
               size="small"
               type="primary"
-              :disabled="row.status !== 'completed' || (row.publish_status === 'completed' && row.publish_url)"
+              :disabled="row.status !== 'completed' || row.publish_status === 'running' || (row.publish_status === 'completed' && row.publish_url)"
               @click="retryPublish(row)"
             >
               发布重试
@@ -414,7 +414,12 @@ const retryPublish = async (row) => {
     ElMessage.success(`Job #${row.job_id} 已触发发布`)
     await loadJobs()
   } catch (error) {
-    ElMessage.error(error?.response?.data?.detail || '发布失败')
+    const message = error?.response?.data?.detail || '发布失败'
+    if (message.includes('发布中')) {
+      ElMessage.warning(message)
+      return
+    }
+    ElMessage.error(message)
   } finally {
     submitting.value = false
   }

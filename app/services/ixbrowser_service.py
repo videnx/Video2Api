@@ -461,6 +461,8 @@ class IXBrowserService:
         status = str(row.get("status") or "")
         if status != "completed":
             raise IXBrowserServiceError("仅已完成的任务允许发布")
+        if row.get("publish_status") == "running":
+            raise IXBrowserServiceError("发布中，请稍后再试")
         if row.get("publish_status") == "completed" and self._is_valid_publish_url(row.get("publish_url")):
             return self._build_generate_job(row)
 
@@ -679,6 +681,7 @@ class IXBrowserService:
                     raise IXBrowserServiceError("提交成功但未获取到 accessToken，无法监听任务状态")
 
                 started = time.perf_counter()
+                last_draft_fetch_at = started
                 while True:
                     if (time.perf_counter() - started) >= timeout_seconds:
                         return {
@@ -756,6 +759,7 @@ class IXBrowserService:
                                 task_id=task_id,
                                 prompt=prompt,
                                 created_after=created_after,
+                                generation_id=generation_id,
                             )
                         except Exception as publish_exc:  # noqa: BLE001
                             publish_error = str(publish_exc)
@@ -858,6 +862,7 @@ class IXBrowserService:
                     task_url=task_url,
                     prompt=prompt,
                     created_after=str(row.get("started_at") or row.get("created_at") or ""),
+                    generation_id=row.get("generation_id"),
                 )
                 if publish_url:
                     sqlite_db.update_ixbrowser_generate_job(
@@ -898,6 +903,7 @@ class IXBrowserService:
         task_url: Optional[str],
         prompt: str,
         created_after: Optional[str] = None,
+        generation_id: Optional[str] = None,
     ) -> Optional[str]:
         open_data = await self._open_profile_with_retry(profile_id, max_attempts=2)
         ws_endpoint = open_data.get("ws")
@@ -917,51 +923,63 @@ class IXBrowserService:
 
                 await self._prepare_sora_page(page, profile_id)
                 publish_future = self._watch_publish_url(page)
-                draft_future = self._watch_draft_item_by_task_id(page, task_id)
+                draft_generation = None
+                if isinstance(generation_id, str) and generation_id.strip() and generation_id.strip().startswith("gen_"):
+                    draft_generation = generation_id.strip()
+                if not draft_generation:
+                    draft_future = self._watch_draft_item_by_task_id(page, task_id)
+                    await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
+                    await page.wait_for_timeout(1500)
 
-                await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
-                await page.wait_for_timeout(1500)
+                    draft_data = await self._wait_for_draft_item(
+                        draft_future, timeout_seconds=self.draft_wait_timeout_seconds
+                    )
+                    if isinstance(draft_data, dict):
+                        existing_link = self._extract_publish_url(str(draft_data))
+                        if existing_link:
+                            return existing_link
+                        draft_generation = self._extract_generation_id(draft_data)
 
-                draft_data = await self._wait_for_draft_item(
-                    draft_future, timeout_seconds=self.draft_wait_timeout_seconds
-                )
-                generation_id = None
-                if isinstance(draft_data, dict):
-                    existing_link = self._extract_publish_url(str(draft_data))
-                    if existing_link:
-                        return existing_link
-                    generation_id = self._extract_generation_id(draft_data)
-                    if isinstance(generation_id, str) and generation_id.strip() and generation_id.startswith("gen_"):
-                        await page.goto(
-                            f"https://sora.chatgpt.com/d/{generation_id}",
-                            wait_until="domcontentloaded",
-                            timeout=40_000,
-                        )
-                        await page.wait_for_timeout(1200)
-
-                if not generation_id:
-                    clicked = await self._open_draft_from_list(page, task_id=task_id, prompt=prompt)
-                    if clicked:
-                        try:
-                            await page.wait_for_url("**/d/**", timeout=8000)
-                        except Exception:  # noqa: BLE001
-                            pass
-
-                await page.wait_for_timeout(800)
-                if not generation_id:
-                    generation_id = self._extract_generation_id_from_url(page.url)
-                if not generation_id:
+                if not draft_generation:
                     raise IXBrowserServiceError("20分钟内未捕获generation_id")
+
+                await page.goto(
+                    f"https://sora.chatgpt.com/d/{draft_generation}",
+                    wait_until="domcontentloaded",
+                    timeout=40_000,
+                )
+                await page.wait_for_timeout(1200)
                 await self._clear_caption_input(page)
                 device_id = await self._get_device_id_from_context(context)
-                api_publish = await self._publish_sora_post_from_page(
-                    page=page,
-                    task_id=task_id,
-                    prompt=prompt,
-                    device_id=device_id,
-                    created_after=created_after,
-                    generation_id=generation_id if isinstance(generation_id, str) else None,
-                )
+                api_publish = None
+                for attempt in range(2):
+                    try:
+                        api_publish = await self._publish_sora_post_from_page(
+                            page=page,
+                            task_id=task_id,
+                            prompt=prompt,
+                            device_id=device_id,
+                            created_after=created_after,
+                            generation_id=draft_generation,
+                        )
+                        break
+                    except Exception as publish_exc:  # noqa: BLE001
+                        if (
+                            attempt == 0
+                            and "Execution context was destroyed" in str(publish_exc)
+                            and draft_generation
+                        ):
+                            try:
+                                await page.goto(
+                                    f"https://sora.chatgpt.com/d/{draft_generation}",
+                                    wait_until="domcontentloaded",
+                                    timeout=40_000,
+                                )
+                                await page.wait_for_timeout(1200)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            continue
+                        raise
                 if api_publish.get("publish_url"):
                     return api_publish["publish_url"]
                 existing_dom_link = await self._find_publish_url_from_dom(page)
@@ -995,53 +1013,67 @@ class IXBrowserService:
         task_id: Optional[str],
         prompt: str,
         created_after: Optional[str] = None,
+        generation_id: Optional[str] = None,
     ) -> Optional[str]:
         publish_future = self._watch_publish_url(page)
-        draft_future = self._watch_draft_item_by_task_id(page, task_id)
+        draft_generation = None
+        if isinstance(generation_id, str) and generation_id.strip() and generation_id.strip().startswith("gen_"):
+            draft_generation = generation_id.strip()
+        if not draft_generation:
+            draft_future = self._watch_draft_item_by_task_id(page, task_id)
 
-        await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
-        await page.wait_for_timeout(1500)
+            await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
+            await page.wait_for_timeout(1500)
 
-        draft_data = await self._wait_for_draft_item(
-            draft_future, timeout_seconds=self.draft_wait_timeout_seconds
-        )
-        generation_id = None
-        if isinstance(draft_data, dict):
-            existing_link = self._extract_publish_url(str(draft_data))
-            if existing_link:
-                return existing_link
-            generation_id = self._extract_generation_id(draft_data)
-            if isinstance(generation_id, str) and generation_id.strip() and generation_id.startswith("gen_"):
-                await page.goto(
-                    f"https://sora.chatgpt.com/d/{generation_id}",
-                    wait_until="domcontentloaded",
-                    timeout=40_000,
-                )
-                await page.wait_for_timeout(1200)
+            draft_data = await self._wait_for_draft_item(
+                draft_future, timeout_seconds=self.draft_wait_timeout_seconds
+            )
+            if isinstance(draft_data, dict):
+                existing_link = self._extract_publish_url(str(draft_data))
+                if existing_link:
+                    return existing_link
+                draft_generation = self._extract_generation_id(draft_data)
 
-        if not generation_id:
-            clicked = await self._open_draft_from_list(page, task_id=task_id, prompt=prompt)
-            if clicked:
-                try:
-                    await page.wait_for_url("**/d/**", timeout=8000)
-                except Exception:  # noqa: BLE001
-                    pass
-
-        await page.wait_for_timeout(800)
-        if not generation_id:
-            generation_id = self._extract_generation_id_from_url(page.url)
-        if not generation_id:
+        if not draft_generation:
             raise IXBrowserServiceError("20分钟内未捕获generation_id")
+
+        await page.goto(
+            f"https://sora.chatgpt.com/d/{draft_generation}",
+            wait_until="domcontentloaded",
+            timeout=40_000,
+        )
+        await page.wait_for_timeout(1200)
         await self._clear_caption_input(page)
         device_id = await self._get_device_id_from_context(page.context)
-        api_publish = await self._publish_sora_post_from_page(
-            page=page,
-            task_id=task_id,
-            prompt=prompt,
-            device_id=device_id,
-            created_after=created_after,
-            generation_id=generation_id if isinstance(generation_id, str) else None,
-        )
+        api_publish = None
+        for attempt in range(2):
+            try:
+                api_publish = await self._publish_sora_post_from_page(
+                    page=page,
+                    task_id=task_id,
+                    prompt=prompt,
+                    device_id=device_id,
+                    created_after=created_after,
+                    generation_id=draft_generation,
+                )
+                break
+            except Exception as publish_exc:  # noqa: BLE001
+                if (
+                    attempt == 0
+                    and "Execution context was destroyed" in str(publish_exc)
+                    and draft_generation
+                ):
+                    try:
+                        await page.goto(
+                            f"https://sora.chatgpt.com/d/{draft_generation}",
+                            wait_until="domcontentloaded",
+                            timeout=40_000,
+                        )
+                        await page.wait_for_timeout(1200)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+                raise
         if api_publish.get("publish_url"):
             return api_publish["publish_url"]
         existing_dom_link = await self._find_publish_url_from_dom(page)
@@ -1529,14 +1561,6 @@ class IXBrowserService:
                     return value
                 if value.startswith("/"):
                     return f"https://sora.chatgpt.com{value}"
-        for key in ("id", "draft_id", "project_id", "video_id", "asset_id"):
-            value = item.get(key)
-            if isinstance(value, str) and value.strip():
-                if value.startswith("gen_"):
-                    return f"https://sora.chatgpt.com/d/{value}"
-                return f"https://sora.chatgpt.com/g/{value}"
-        if task_id:
-            return f"https://sora.chatgpt.com/g/{task_id}"
         return None
 
     async def _open_draft_from_list(
@@ -1552,8 +1576,12 @@ class IXBrowserService:
               const normalize = (text) => (text || '').toString().toLowerCase();
               const promptText = normalize(prompt);
               const taskText = normalize(taskId);
-              const anchors = Array.from(document.querySelectorAll('a[href*=\"/draft\"], a[href*=\"/d/\"]'))
-                .filter((node) => !normalize(node.getAttribute('href')).includes('/g/'));
+              const anchorSelector = 'a[href*="/draft"], a[href*="/d/"]';
+              const anchors = Array.from(document.querySelectorAll(anchorSelector))
+                .filter((node) => {
+                  const href = normalize(node.getAttribute('href'));
+                  return href && !href.includes('/g/');
+                });
               const pickAnchor = () => {
                 if (taskText) {
                   const hit = anchors.find((node) => normalize(node.getAttribute('href')).includes(taskText));
@@ -1572,16 +1600,30 @@ class IXBrowserService:
                 return true;
               }
 
-              const cards = Array.from(document.querySelectorAll('button, [role=\"button\"], div'));
-              const matches = cards.filter((node) => {
+              const findNestedAnchor = (node) => {
+                if (!node || !node.querySelector) return null;
+                const nested = node.querySelector(anchorSelector);
+                if (!nested) return null;
+                const href = normalize(nested.getAttribute('href'));
+                if (!href || href.includes('/g/')) return null;
+                return nested;
+              };
+
+              const cards = Array.from(
+                document.querySelectorAll('[role="listitem"], article, li, section, div, button, [role="button"]')
+              );
+              const match = cards.find((node) => {
                 const text = normalize(node.innerText || node.textContent || '');
                 if (taskText && text.includes(taskText)) return true;
                 if (promptText && text.includes(promptText)) return true;
                 return false;
               });
-              if (matches.length) {
-                matches[0].click();
-                return true;
+              if (match) {
+                const nested = findNestedAnchor(match);
+                if (nested) {
+                  nested.click();
+                  return true;
+                }
               }
               return false;
             }
