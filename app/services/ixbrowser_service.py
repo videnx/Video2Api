@@ -1172,6 +1172,18 @@ class IXBrowserService:
                 const baseUrl = "https://sora.chatgpt.com/backend/project_y/profile/drafts";
                 const limit = 60;
                 const maxPages = 6;
+                const headers = { "Accept": "application/json" };
+                try {
+                  const sessionResp = await fetch("https://sora.chatgpt.com/api/auth/session", {
+                    method: "GET",
+                    credentials: "include"
+                  });
+                  const sessionText = await sessionResp.text();
+                  let sessionJson = null;
+                  try { sessionJson = JSON.parse(sessionText); } catch (e) {}
+                  const accessToken = sessionJson?.accessToken || null;
+                  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+                } catch (e) {}
                 const norm = (v) => (v || '').toString().trim().toLowerCase();
                 const taskIdNorm = norm(taskId);
                 const promptNorm = norm(prompt);
@@ -1238,7 +1250,7 @@ class IXBrowserService:
                   const url = cursor
                     ? `${baseUrl}?limit=${limit}&cursor=${encodeURIComponent(cursor)}`
                     : `${baseUrl}?limit=${limit}`;
-                  const resp = await fetch(url, { method: "GET", credentials: "include" });
+                  const resp = await fetch(url, { method: "GET", credentials: "include", headers });
                   const text = await resp.text();
                   let json = null;
                   try { json = JSON.parse(text); } catch (e) {}
@@ -1266,7 +1278,7 @@ class IXBrowserService:
                   if (cursor && cursor.startsWith("http")) {
                     const next = cursor;
                     cursor = null;
-                    const resp2 = await fetch(next, { method: "GET", credentials: "include" });
+                    const resp2 = await fetch(next, { method: "GET", credentials: "include", headers });
                     const text2 = await resp2.text();
                     let json2 = null;
                     try { json2 = JSON.parse(text2); } catch (e) {}
@@ -1311,10 +1323,24 @@ class IXBrowserService:
                 """
                 async ({taskId, limit}) => {
                   try {
-                    const resp = await fetch(`https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=${limit}`, {
-                      method: "GET",
-                      credentials: "include"
-                    });
+                const headers = { "Accept": "application/json" };
+                try {
+                  const sessionResp = await fetch("https://sora.chatgpt.com/api/auth/session", {
+                    method: "GET",
+                    credentials: "include"
+                  });
+                  const sessionText = await sessionResp.text();
+                  let sessionJson = null;
+                  try { sessionJson = JSON.parse(sessionText); } catch (e) {}
+                  const accessToken = sessionJson?.accessToken || null;
+                  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+                } catch (e) {}
+
+                const resp = await fetch(`https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=${limit}`, {
+                  method: "GET",
+                  credentials: "include",
+                  headers
+                });
                     const text = await resp.text();
                     let json = null;
                     try { json = JSON.parse(text); } catch (e) {}
