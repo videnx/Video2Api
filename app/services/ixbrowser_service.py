@@ -1347,8 +1347,19 @@ class IXBrowserService:
                     const items = json?.items;
                     if (!Array.isArray(items)) return null;
                     const norm = (v) => (v || '').toString().toLowerCase();
-                    const taskIdNorm = norm(taskId);
-                    return items.find((item) => norm(item?.task_id) === taskIdNorm) || null;
+                    const normalizeTask = (v) => norm(v).replace(/^task_/, '');
+                    const taskIdNorm = normalizeTask(taskId);
+                    return items.find((item) => {
+                      const itemTask = item?.task_id
+                        || item?.taskId
+                        || item?.task?.id
+                        || item?.task?.task_id
+                        || item?.id
+                        || item?.generation?.task_id
+                        || item?.generation?.taskId;
+                      const itemTaskNorm = normalizeTask(itemTask);
+                      return itemTaskNorm && itemTaskNorm === taskIdNorm;
+                    }) || null;
                   } catch (e) {
                     return null;
                   }
