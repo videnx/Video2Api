@@ -910,14 +910,21 @@ class IXBrowserService:
                 await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
                 await page.wait_for_timeout(1500)
 
-                draft_data = await self._fetch_draft_item(
-                    page, task_id=task_id, prompt=prompt, created_after=created_after
-                )
+                draft_data = await self._fetch_draft_item_by_task_id(page, task_id=task_id, limit=15, retries=5)
+                if not draft_data:
+                    draft_data = await self._fetch_draft_item(
+                        page, task_id=task_id, prompt=prompt, created_after=created_after
+                    )
+                generation_id = None
                 if isinstance(draft_data, dict):
                     existing_link = self._extract_publish_url(str(draft_data))
                     if existing_link:
                         return existing_link
-                    draft_url = self._resolve_draft_url_from_item(draft_data, task_id)
+                    generation_id = self._extract_generation_id(draft_data)
+                    if isinstance(generation_id, str) and generation_id.strip() and generation_id.startswith("gen_"):
+                        draft_url = f"https://sora.chatgpt.com/d/{generation_id}"
+                    else:
+                        draft_url = self._resolve_draft_url_from_item(draft_data, task_id)
                     if draft_url:
                         await page.goto(draft_url, wait_until="domcontentloaded", timeout=40_000)
                         await page.wait_for_timeout(1200)
@@ -936,6 +943,7 @@ class IXBrowserService:
                     prompt=prompt,
                     device_id=device_id,
                     created_after=created_after,
+                    generation_id=generation_id if isinstance(generation_id, str) else None,
                 )
                 if api_publish.get("publish_url"):
                     return api_publish["publish_url"]
@@ -976,14 +984,21 @@ class IXBrowserService:
         await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
         await page.wait_for_timeout(1500)
 
-        draft_data = await self._fetch_draft_item(
-            page, task_id=task_id, prompt=prompt, created_after=created_after
-        )
+        draft_data = await self._fetch_draft_item_by_task_id(page, task_id=task_id, limit=15, retries=5)
+        if not draft_data:
+            draft_data = await self._fetch_draft_item(
+                page, task_id=task_id, prompt=prompt, created_after=created_after
+            )
+        generation_id = None
         if isinstance(draft_data, dict):
             existing_link = self._extract_publish_url(str(draft_data))
             if existing_link:
                 return existing_link
-            draft_url = self._resolve_draft_url_from_item(draft_data, task_id)
+            generation_id = self._extract_generation_id(draft_data)
+            if isinstance(generation_id, str) and generation_id.strip() and generation_id.startswith("gen_"):
+                draft_url = f"https://sora.chatgpt.com/d/{generation_id}"
+            else:
+                draft_url = self._resolve_draft_url_from_item(draft_data, task_id)
             if draft_url:
                 await page.goto(draft_url, wait_until="domcontentloaded", timeout=40_000)
                 await page.wait_for_timeout(1200)
@@ -1002,6 +1017,7 @@ class IXBrowserService:
             prompt=prompt,
             device_id=device_id,
             created_after=created_after,
+            generation_id=generation_id if isinstance(generation_id, str) else None,
         )
         if api_publish.get("publish_url"):
             return api_publish["publish_url"]
@@ -1279,6 +1295,45 @@ class IXBrowserService:
             {"taskId": task_id, "prompt": prompt, "createdAfter": created_after}
         )
         return data if isinstance(data, dict) else None
+
+    async def _fetch_draft_item_by_task_id(
+        self,
+        page,
+        task_id: Optional[str],
+        limit: int = 15,
+        retries: int = 4,
+        delay_ms: int = 1500,
+    ) -> Optional[dict]:
+        if not task_id:
+            return None
+        for _ in range(max(int(retries), 1)):
+            data = await page.evaluate(
+                """
+                async ({taskId, limit}) => {
+                  try {
+                    const resp = await fetch(`https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=${limit}`, {
+                      method: "GET",
+                      credentials: "include"
+                    });
+                    const text = await resp.text();
+                    let json = null;
+                    try { json = JSON.parse(text); } catch (e) {}
+                    const items = json?.items;
+                    if (!Array.isArray(items)) return null;
+                    const norm = (v) => (v || '').toString().toLowerCase();
+                    const taskIdNorm = norm(taskId);
+                    return items.find((item) => norm(item?.task_id) === taskIdNorm) || null;
+                  } catch (e) {
+                    return null;
+                  }
+                }
+                """,
+                {"taskId": task_id, "limit": int(limit) if isinstance(limit, int) else 15}
+            )
+            if isinstance(data, dict):
+                return data
+            await page.wait_for_timeout(int(delay_ms))
+        return None
 
     def _extract_generation_id(self, item: Optional[dict]) -> Optional[str]:
         if not isinstance(item, dict):
@@ -1767,16 +1822,20 @@ class IXBrowserService:
         prompt: str,
         device_id: str,
         created_after: Optional[str] = None,
+        generation_id: Optional[str] = None,
     ) -> Dict[str, Optional[str]]:
-        draft_data = await self._fetch_draft_item(
-            page, task_id=task_id, prompt=prompt, created_after=created_after
-        )
-        if not isinstance(draft_data, dict):
-            return {"publish_url": None, "error": "未找到草稿数据"}
-
-        generation_id = self._extract_generation_id(draft_data)
         if not generation_id:
-            return {"publish_url": None, "error": "草稿缺少 generation_id"}
+            draft_data = await self._fetch_draft_item_by_task_id(page, task_id=task_id, limit=15, retries=5)
+            if not draft_data:
+                draft_data = await self._fetch_draft_item(
+                    page, task_id=task_id, prompt=prompt, created_after=created_after
+                )
+            if not isinstance(draft_data, dict):
+                return {"publish_url": None, "error": "未找到草稿数据"}
+
+            generation_id = self._extract_generation_id(draft_data)
+            if not generation_id:
+                return {"publish_url": None, "error": "草稿缺少 generation_id"}
 
         data = await page.evaluate(
             """
