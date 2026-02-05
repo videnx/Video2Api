@@ -905,6 +905,12 @@ class IXBrowserService:
         created_after: Optional[str] = None,
         generation_id: Optional[str] = None,
     ) -> Optional[str]:
+        logger.info(
+            "发布重试开始: profile=%s task_id=%s generation_id=%s",
+            profile_id,
+            task_id,
+            generation_id,
+        )
         open_data = await self._open_profile_with_retry(profile_id, max_attempts=2)
         ws_endpoint = open_data.get("ws")
         if not ws_endpoint:
@@ -928,19 +934,41 @@ class IXBrowserService:
                     draft_generation = generation_id.strip()
                 if not draft_generation:
                     draft_future = self._watch_draft_item_by_task_id(page, task_id)
+                    logger.info("发布重试进入 drafts 等待: profile=%s task_id=%s", profile_id, task_id)
                     await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
                     await page.wait_for_timeout(1500)
 
+                    draft_started = time.perf_counter()
                     draft_data = await self._wait_for_draft_item(
                         draft_future, timeout_seconds=self.draft_wait_timeout_seconds
+                    )
+                    draft_elapsed = time.perf_counter() - draft_started
+                    logger.info(
+                        "发布重试 drafts 等待结束: profile=%s task_id=%s elapsed=%.1fs matched=%s",
+                        profile_id,
+                        task_id,
+                        draft_elapsed,
+                        bool(draft_data),
                     )
                     if isinstance(draft_data, dict):
                         existing_link = self._extract_publish_url(str(draft_data))
                         if existing_link:
                             return existing_link
                         draft_generation = self._extract_generation_id(draft_data)
+                        logger.info(
+                            "发布重试 drafts 匹配 generation_id: profile=%s task_id=%s generation_id=%s",
+                            profile_id,
+                            task_id,
+                            draft_generation,
+                        )
 
                 if not draft_generation:
+                    logger.info(
+                        "发布重试未获取 generation_id: profile=%s task_id=%s current_url=%s",
+                        profile_id,
+                        task_id,
+                        page.url,
+                    )
                     raise IXBrowserServiceError("20分钟内未捕获generation_id")
 
                 await page.goto(
@@ -949,6 +977,13 @@ class IXBrowserService:
                     timeout=40_000,
                 )
                 await page.wait_for_timeout(1200)
+                logger.info(
+                    "发布重试进入详情页: profile=%s task_id=%s generation_id=%s url=%s",
+                    profile_id,
+                    task_id,
+                    draft_generation,
+                    page.url,
+                )
                 await self._clear_caption_input(page)
                 device_id = await self._get_device_id_from_context(context)
                 api_publish = None
@@ -1015,6 +1050,12 @@ class IXBrowserService:
         created_after: Optional[str] = None,
         generation_id: Optional[str] = None,
     ) -> Optional[str]:
+        logger.info(
+            "发布流程开始: task_id=%s generation_id=%s url=%s",
+            task_id,
+            generation_id,
+            page.url,
+        )
         publish_future = self._watch_publish_url(page)
         draft_generation = None
         if isinstance(generation_id, str) and generation_id.strip() and generation_id.strip().startswith("gen_"):
@@ -1022,19 +1063,38 @@ class IXBrowserService:
         if not draft_generation:
             draft_future = self._watch_draft_item_by_task_id(page, task_id)
 
+            logger.info("发布流程进入 drafts 等待: task_id=%s", task_id)
             await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
             await page.wait_for_timeout(1500)
 
+            draft_started = time.perf_counter()
             draft_data = await self._wait_for_draft_item(
                 draft_future, timeout_seconds=self.draft_wait_timeout_seconds
+            )
+            draft_elapsed = time.perf_counter() - draft_started
+            logger.info(
+                "发布流程 drafts 等待结束: task_id=%s elapsed=%.1fs matched=%s",
+                task_id,
+                draft_elapsed,
+                bool(draft_data),
             )
             if isinstance(draft_data, dict):
                 existing_link = self._extract_publish_url(str(draft_data))
                 if existing_link:
                     return existing_link
                 draft_generation = self._extract_generation_id(draft_data)
+                logger.info(
+                    "发布流程 drafts 匹配 generation_id: task_id=%s generation_id=%s",
+                    task_id,
+                    draft_generation,
+                )
 
         if not draft_generation:
+            logger.info(
+                "发布流程未获取 generation_id: task_id=%s current_url=%s",
+                task_id,
+                page.url,
+            )
             raise IXBrowserServiceError("20分钟内未捕获generation_id")
 
         await page.goto(
@@ -1043,6 +1103,12 @@ class IXBrowserService:
             timeout=40_000,
         )
         await page.wait_for_timeout(1200)
+        logger.info(
+            "发布流程进入详情页: task_id=%s generation_id=%s url=%s",
+            task_id,
+            draft_generation,
+            page.url,
+        )
         await self._clear_caption_input(page)
         device_id = await self._get_device_id_from_context(page.context)
         api_publish = None
