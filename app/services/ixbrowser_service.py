@@ -1349,7 +1349,7 @@ class IXBrowserService:
                     const norm = (v) => (v || '').toString().toLowerCase();
                     const normalizeTask = (v) => norm(v).replace(/^task_/, '');
                     const taskIdNorm = normalizeTask(taskId);
-                    return items.find((item) => {
+                    const direct = items.find((item) => {
                       const itemTask = item?.task_id
                         || item?.taskId
                         || item?.task?.id
@@ -1359,7 +1359,16 @@ class IXBrowserService:
                         || item?.generation?.taskId;
                       const itemTaskNorm = normalizeTask(itemTask);
                       return itemTaskNorm && itemTaskNorm === taskIdNorm;
-                    }) || null;
+                    });
+                    if (direct) return direct;
+                    // fallback: search raw payload for task_id string
+                    for (const item of items) {
+                      try {
+                        const blob = JSON.stringify(item).toLowerCase();
+                        if (blob.includes(taskIdNorm)) return item;
+                      } catch (e) {}
+                    }
+                    return null;
                   } catch (e) {
                     return null;
                   }
