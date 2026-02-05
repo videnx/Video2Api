@@ -105,7 +105,7 @@ class IXBrowserService:
     sora_blocked_resource_types = {"image", "media", "font"}
 
     def __init__(self) -> None:
-        self._ixbrowser_lock: Optional[asyncio.Lock] = None
+        self._ixbrowser_semaphore: Optional[asyncio.Semaphore] = None
 
     async def list_groups(self) -> List[IXBrowserGroup]:
         """
@@ -2383,10 +2383,10 @@ class IXBrowserService:
         url = f"{base}{path}"
         timeout = httpx.Timeout(10.0)
 
-        if self._ixbrowser_lock is None:
-            self._ixbrowser_lock = asyncio.Lock()
+        if self._ixbrowser_semaphore is None:
+            self._ixbrowser_semaphore = asyncio.Semaphore(2)
 
-        async with self._ixbrowser_lock:
+        async with self._ixbrowser_semaphore:
             for attempt in range(self.ixbrowser_busy_retry_max + 1):
                 try:
                     async with httpx.AsyncClient(timeout=timeout) as client:
