@@ -67,6 +67,10 @@ class IXBrowserSessionScanResponse(BaseModel):
     results: List[IXBrowserSessionScanItem] = Field(default_factory=list)
 
 
+class IXBrowserScanRequest(BaseModel):
+    profile_ids: List[int] = Field(default_factory=list)
+
+
 class IXBrowserScanRunSummary(BaseModel):
     run_id: int
     group_id: int
