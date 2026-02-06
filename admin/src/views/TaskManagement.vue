@@ -1,127 +1,196 @@
 <template>
   <div class="tasks-page">
-    <el-card class="glass-card filter-card" v-loading="loading">
-      <div class="filter-row">
-        <el-select v-model="selectedGroupTitle" class="w-180" @change="loadJobs">
-          <el-option
-            v-for="group in groups"
-            :key="group.id"
-            :label="`${group.title} (ID:${group.id})`"
-            :value="group.title"
-          />
-        </el-select>
+    <section class="command-bar" v-loading="loading">
+      <div class="command-left">
+        <div class="brand">
+          <div class="title">Sora 任务指挥台</div>
+          <div class="subtitle">生成 → 进度 → GenID → 发布</div>
+        </div>
+        <div class="filters">
+          <el-select v-model="selectedGroupTitle" class="w-180" @change="loadJobs">
+            <el-option
+              v-for="group in groups"
+              :key="group.id"
+              :label="`${group.title} (ID:${group.id})`"
+              :value="group.title"
+            />
+          </el-select>
 
-        <el-select v-model="taskType" class="w-140">
-          <el-option label="全部类型" value="all" />
-          <el-option label="视频任务" value="video" />
-          <el-option label="图片任务（预留）" value="image" />
-        </el-select>
+          <el-select v-model="statusFilter" class="w-140" @change="loadJobs">
+            <el-option label="全部状态" value="all" />
+            <el-option label="排队中" value="queued" />
+            <el-option label="运行中" value="running" />
+            <el-option label="成功" value="completed" />
+            <el-option label="失败" value="failed" />
+            <el-option label="已取消" value="canceled" />
+          </el-select>
 
-        <el-select v-model="statusFilter" class="w-140">
-          <el-option label="全部状态" value="all" />
-          <el-option label="排队中" value="queued" />
-          <el-option label="运行中" value="running" />
-          <el-option label="成功" value="completed" />
-          <el-option label="失败" value="failed" />
-        </el-select>
+          <el-select v-model="phaseFilter" class="w-140" @change="loadJobs">
+            <el-option label="全部阶段" value="all" />
+            <el-option label="排队" value="queue" />
+            <el-option label="提交" value="submit" />
+            <el-option label="进度" value="progress" />
+            <el-option label="GenID" value="genid" />
+            <el-option label="发布" value="publish" />
+            <el-option label="去水印" value="watermark" />
+            <el-option label="完成" value="done" />
+          </el-select>
 
-        <el-input v-model="keyword" class="w-260" clearable placeholder="搜索 Job/任务ID/Prompt/窗口ID" />
-
-        <el-button @click="loadJobs">刷新</el-button>
-        <el-button type="primary" @click="openCreateDialog">新建任务</el-button>
+          <el-input v-model="keyword" class="w-260" clearable placeholder="搜索 Job/Task/GenID/Prompt" />
+        </div>
       </div>
-    </el-card>
 
-    <el-card class="glass-card table-card" v-loading="loading">
+      <div class="command-right">
+        <div class="concurrency">
+          <div class="metric">
+            <span class="label">并发</span>
+            <span class="value">{{ runningCount }}/{{ concurrencyLimit }}</span>
+          </div>
+          <div class="metric">
+            <span class="label">排队</span>
+            <span class="value">{{ queuedCount }}</span>
+          </div>
+        </div>
+        <div class="actions">
+          <el-button @click="loadJobs">刷新</el-button>
+          <el-button type="primary" @click="openCreateDialog">新建任务</el-button>
+        </div>
+      </div>
+    </section>
+
+    <section class="overview">
+      <div class="overview-card">
+        <div class="card-title">排队中</div>
+        <div class="card-value">{{ queuedCount }}</div>
+        <div class="card-meta">等待进入执行</div>
+      </div>
+      <div class="overview-card">
+        <div class="card-title">运行中</div>
+        <div class="card-value">{{ runningCount }}</div>
+        <div class="card-meta">正在生成或发布</div>
+      </div>
+      <div class="overview-card">
+        <div class="card-title">已完成</div>
+        <div class="card-value">{{ completedCount }}</div>
+        <div class="card-meta">已获取分享链接</div>
+      </div>
+      <div class="overview-card danger">
+        <div class="card-title">失败</div>
+        <div class="card-value">{{ failedCount }}</div>
+        <div class="card-meta">可从失败阶段重试</div>
+      </div>
+    </section>
+
+    <el-card class="table-card" v-loading="loading">
       <template #header>
         <div class="table-head">
-          <span>任务列表（统一入口，图片已预留）</span>
-          <el-tag type="info" size="small">自动重试策略：提交失败最多重试 1 次</el-tag>
+          <span>任务列表</span>
+          <span class="table-hint">自动发布 · 只用 GenID 进入 /d/gen_xxx</span>
         </div>
       </template>
 
-      <el-table :data="filteredJobs" border stripe height="560">
-        <el-table-column prop="job_id" label="Job" width="86" />
-        <el-table-column label="类型" width="90">
+      <el-table :data="filteredJobs" class="card-table task-table">
+        <el-table-column label="任务" min-width="480">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.task_type === 'video' ? 'success' : 'info'">
-              {{ row.task_type }}
-            </el-tag>
+            <div class="task-cell">
+              <div class="task-title">
+                <span class="task-id">#{{ row.job_id }}</span>
+                <span class="task-dot" />
+                <span class="task-window">窗口 {{ row.profile_id }}</span>
+                <span class="task-dot" />
+                <span class="task-meta">{{ row.duration }}</span>
+                <span class="task-dot" />
+                <span class="task-meta">{{ row.aspect_ratio }}</span>
+                <span class="task-dot" />
+                <span class="task-time">{{ formatTaskTime(row.created_at) }}</span>
+              </div>
+              <el-tooltip v-if="row.prompt" :content="row.prompt" placement="top" effect="dark">
+                <span class="task-prompt">{{ row.prompt }}</span>
+              </el-tooltip>
+              <span v-else class="task-prompt task-prompt-empty">-</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="profile_id" label="窗口" width="86" />
-        <el-table-column prop="duration" label="时长" width="80" />
-        <el-table-column prop="aspect_ratio" label="比例" width="95" />
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" min-width="240">
           <template #default="{ row }">
-            <el-tag size="small" :type="statusType(row.status)">
-              {{ row.status }}
-            </el-tag>
+            <div class="status-cell">
+              <div class="status-head">
+                <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
+                <span class="status-phase">{{ phaseText(row.phase) }}</span>
+              </div>
+              <el-progress
+                v-if="row.status === 'running'"
+                class="status-progress"
+                :percentage="row.progress_pct"
+                :status="progressStatus(row)"
+                :stroke-width="8"
+                :text-inside="true"
+              />
+              <el-tooltip
+                v-if="jobErrorSummary(row)"
+                :content="jobErrorSummary(row)"
+                placement="top"
+                effect="dark"
+              >
+                <span class="status-error">{{ shorten(jobErrorSummary(row), 72) }}</span>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="进度" width="160">
+        <el-table-column label="输出" min-width="300">
           <template #default="{ row }">
-            <el-progress
-              :percentage="row.progress"
-              :status="progressStatus(row)"
-              :stroke-width="10"
-              :text-inside="true"
-            />
+            <div class="output-cell">
+              <div class="output-line">
+                <a
+                  v-if="row.publish_url"
+                  class="share-code-link"
+                  href="#"
+                  :title="extractShareCode(row.publish_url)"
+                  @click.prevent="openLink(row.publish_url)"
+                >
+                  {{ extractShareCode(row.publish_url) }}
+                </a>
+                <span v-else class="output-empty" />
+              </div>
+              <div class="output-line">
+                <a
+                  v-if="row.watermark_url"
+                  class="share-code-link watermark-link"
+                  href="#"
+                  :title="extractShareCode(row.watermark_url)"
+                  @click.prevent="openLink(row.watermark_url)"
+                >
+                  {{ extractShareCode(row.watermark_url) }}
+                </a>
+                <template v-else-if="row.watermark_status === 'failed'">
+                  <span class="output-error">去水印失败</span>
+                  <el-button
+                    v-if="canRetryWatermark(row)"
+                    size="small"
+                    class="btn-soft"
+                    @click="retryWatermark(row)"
+                  >
+                    重试
+                  </el-button>
+                </template>
+                <span v-else class="output-empty" />
+              </div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="发布状态" width="110">
+        <el-table-column label="操作" fixed="right" width="150">
           <template #default="{ row }">
-            <el-tag size="small" :type="publishStatusType(row.publish_status)">
-              {{ row.publish_status || 'queued' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="submit_attempts" label="提交重试" width="96" />
-        <el-table-column prop="poll_attempts" label="轮询次数" width="96" />
-        <el-table-column prop="task_id" label="任务ID" min-width="150" />
-        <el-table-column label="GenID" min-width="170">
-          <template #default="{ row }">
-            <span v-if="row.generation_id">{{ row.generation_id }}</span>
-            <el-button v-else size="small" type="primary" @click="fetchGenId(row)">获取 genid</el-button>
-          </template>
-        </el-table-column>
-        <el-table-column label="发布链接" min-width="160">
-          <template #default="{ row }">
-            <a v-if="row.publish_url" :href="row.publish_url" target="_blank" class="task-link">打开</a>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="任务链接" width="100">
-          <template #default="{ row }">
-            <a v-if="row.task_url" :href="row.task_url" target="_blank" class="task-link">打开</a>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="created_at" label="创建时间" width="170">
-          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column prop="error" label="错误" min-width="180">
-          <template #default="{ row }">{{ row.error || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="操作" fixed="right" width="220">
-          <template #default="{ row }">
-            <el-button size="small" @click="openDetail(row)">详情</el-button>
-            <el-button
-              size="small"
-              type="warning"
-              :disabled="row.task_type !== 'video' || row.status !== 'failed'"
-              @click="retryJob(row)"
-            >
-              重试
-            </el-button>
-            <el-button
-              size="small"
-              type="primary"
-              :disabled="row.status !== 'completed' || row.publish_status === 'running' || (row.publish_status === 'completed' && row.publish_url)"
-              @click="retryPublish(row)"
-            >
-              发布重试
-            </el-button>
+            <div class="action-cell">
+              <el-button size="small" class="btn-soft" @click="openDetail(row)">详情</el-button>
+              <el-button
+                v-if="canRetryJob(row)"
+                size="small"
+                type="warning"
+                @click="retryJob(row)"
+              >
+                重试
+              </el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -129,12 +198,6 @@
 
     <el-dialog v-model="createDialogVisible" title="新建任务" width="620px">
       <el-form :model="createForm" label-width="90px">
-        <el-form-item label="任务类型">
-          <el-select v-model="createForm.task_type" style="width: 100%">
-            <el-option label="视频任务" value="video" />
-            <el-option label="图片任务（预留）" value="image" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="分组">
           <el-select v-model="createForm.group_title" style="width: 100%">
             <el-option
@@ -180,7 +243,40 @@
     </el-dialog>
 
     <el-drawer v-model="detailDrawerVisible" title="任务详情" size="620px" direction="rtl">
-      <pre class="detail-json">{{ detailText }}</pre>
+      <div class="detail-block" v-if="detailJob">
+        <div class="detail-grid">
+          <div class="detail-item"><span>Job</span><strong>#{{ detailJob.job_id }}</strong></div>
+          <div class="detail-item"><span>窗口</span><strong>{{ detailJob.profile_id }}</strong></div>
+          <div class="detail-item"><span>状态</span><strong>{{ detailJob.status }}</strong></div>
+          <div class="detail-item"><span>阶段</span><strong>{{ detailJob.phase }}</strong></div>
+          <div class="detail-item"><span>进度</span><strong>{{ detailJob.progress_pct }}%</strong></div>
+          <div class="detail-item"><span>TaskID</span><strong>{{ detailJob.task_id || '-' }}</strong></div>
+          <div class="detail-item"><span>GenID</span><strong>{{ detailJob.generation_id || '-' }}</strong></div>
+          <div class="detail-item"><span>分享</span><strong>{{ detailJob.publish_url || '-' }}</strong></div>
+          <div class="detail-item"><span>去水印</span><strong>{{ detailJob.watermark_status || '-' }}</strong></div>
+          <div class="detail-item"><span>无水印链接</span><strong>{{ detailJob.watermark_url || '-' }}</strong></div>
+          <div class="detail-item"><span>去水印重试次数</span><strong>{{ detailJob.watermark_attempts ?? 0 }}</strong></div>
+          <div class="detail-item"><span>去水印错误</span><strong>{{ detailJob.watermark_error || '-' }}</strong></div>
+        </div>
+        <div class="detail-prompt">
+          <div class="detail-label">Prompt</div>
+          <div class="detail-text">{{ detailJob.prompt }}</div>
+        </div>
+      </div>
+      <div class="detail-block">
+        <div class="detail-label">阶段事件</div>
+        <div v-if="detailEvents.length" class="event-list">
+          <div v-for="event in detailEvents" :key="event.id" class="event-item">
+            <div class="event-time">{{ formatTime(event.created_at) }}</div>
+            <div class="event-meta">
+              <span class="event-phase">{{ event.phase }}</span>
+              <span class="event-action">{{ event.event }}</span>
+            </div>
+            <div class="event-message">{{ event.message || '-' }}</div>
+          </div>
+        </div>
+        <div v-else class="event-empty">暂无事件记录</div>
+      </div>
     </el-drawer>
   </div>
 </template>
@@ -188,29 +284,35 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { formatRelativeTimeZh } from '../utils/relativeTime'
 import {
-  createIxBrowserSoraGenerateJob,
+  createSoraJob,
   getIxBrowserGroupWindows,
-  listIxBrowserSoraGenerateJobs,
-  publishIxBrowserSoraGenerateJob,
-  fetchIxBrowserSoraGenerationId
+  getSystemSettings,
+  listSoraJobEvents,
+  listSoraJobs,
+  retrySoraJob,
+  retrySoraJobWatermark
 } from '../api'
 
 const loading = ref(false)
 const submitting = ref(false)
 const createDialogVisible = ref(false)
 const detailDrawerVisible = ref(false)
-const detailText = ref('')
+const detailJob = ref(null)
+const detailEvents = ref([])
 const groups = ref([])
 const jobs = ref([])
+const systemSettings = ref(null)
 const selectedGroupTitle = ref('Sora')
-const taskType = ref('all')
 const statusFilter = ref('all')
+const phaseFilter = ref('all')
 const keyword = ref('')
 let pollingTimer = null
+let relativeTimeTimer = null
+const nowTick = ref(Date.now())
 
 const createForm = ref({
-  task_type: 'video',
   group_title: 'Sora',
   profile_id: null,
   prompt: '',
@@ -218,24 +320,34 @@ const createForm = ref({
   aspect_ratio: 'landscape'
 })
 
+const concurrencyLimit = computed(() => systemSettings.value?.sora?.job_max_concurrency || 2)
+
+const queuedCount = computed(() => jobs.value.filter((item) => item.status === 'queued').length)
+const runningCount = computed(() => jobs.value.filter((item) => item.status === 'running').length)
+const completedCount = computed(() => jobs.value.filter((item) => item.status === 'completed').length)
+const failedCount = computed(() => jobs.value.filter((item) => item.status === 'failed').length)
+
 const filteredJobs = computed(() => {
   return jobs.value.filter((job) => {
-    const byType = taskType.value === 'all' || job.task_type === taskType.value
     const byStatus = statusFilter.value === 'all' || job.status === statusFilter.value
+    const byPhase = phaseFilter.value === 'all' || job.phase === phaseFilter.value
     const q = keyword.value.trim().toLowerCase()
     if (!q) {
-      return byType && byStatus
+      return byStatus && byPhase
     }
     const joined = [
       job.job_id,
       job.profile_id,
       job.task_id || '',
+      job.generation_id || '',
       job.prompt || '',
-      job.error || ''
+      job.error || '',
+      job.watermark_url || '',
+      job.watermark_error || ''
     ]
       .join(' ')
       .toLowerCase()
-    return byType && byStatus && joined.includes(q)
+    return byStatus && byPhase && joined.includes(q)
   })
 })
 
@@ -248,27 +360,95 @@ const formatTime = (value) => {
   }
 }
 
+const formatTaskTime = (value) => formatRelativeTimeZh(value, nowTick.value)
+
+const shorten = (value, maxLen) => {
+  if (!value) return ''
+  if (value.length <= maxLen) return value
+  return `${value.slice(0, maxLen)}...`
+}
+
 const statusType = (status) => {
   if (status === 'completed') return 'success'
   if (status === 'failed') return 'danger'
   if (status === 'running') return 'warning'
-  return 'info'
+  if (status === 'queued') return 'info'
+  if (status === 'canceled') return 'warning'
+  return ''
 }
 
-const publishStatusType = (status) => {
-  if (status === 'completed') return 'success'
-  if (status === 'failed') return 'danger'
-  if (status === 'running') return 'warning'
-  return 'info'
+const statusText = (status) => {
+  if (status === 'queued') return '排队中'
+  if (status === 'running') return '执行中'
+  if (status === 'completed') return '已完成'
+  if (status === 'failed') return '失败'
+  if (status === 'canceled') return '已取消'
+  return status || '-'
+}
+
+const phaseText = (phase) => {
+  if (phase === 'queue') return '排队'
+  if (phase === 'submit') return '提交'
+  if (phase === 'progress') return '进度'
+  if (phase === 'genid') return '捕获 GenID'
+  if (phase === 'publish') return '发布'
+  if (phase === 'watermark') return '去水印'
+  if (phase === 'done') return '完成'
+  return phase || '-'
 }
 
 const progressStatus = (row) => {
   if (row.status === 'completed') return 'success'
   if (row.status === 'failed') return 'exception'
+  if (row.status === 'canceled') return 'warning'
   return ''
 }
 
-const hasRunningJobs = computed(() => jobs.value.some((item) => item.status === 'queued' || item.status === 'running'))
+const canRetryJob = (row) => row?.status === 'failed'
+
+const canRetryWatermark = (row) => row?.watermark_status === 'failed' && Boolean(row?.publish_url)
+
+const jobErrorSummary = (row) => {
+  if (!row) return ''
+  if (row.status === 'failed') return row.error || row.watermark_error || ''
+  return ''
+}
+
+const extractShareCode = (url) => {
+  if (!url) return '-'
+  const raw = String(url).trim()
+  if (!raw) return '-'
+
+  const decodeSafe = (value) => {
+    try {
+      return decodeURIComponent(value)
+    } catch {
+      return value
+    }
+  }
+
+  const text = decodeSafe(raw)
+  const prefixed = text.match(/(s_[A-Za-z0-9]+)/i)
+  if (prefixed?.[1]) {
+    return prefixed[1]
+  }
+
+  try {
+    const parsed = new URL(text)
+    const segments = parsed.pathname.split('/').filter(Boolean)
+    if (segments.length) {
+      return segments[segments.length - 1]
+    }
+  } catch {
+    const fallback = text.split('?')[0].split('#')[0].split('/').filter(Boolean)
+    if (fallback.length) {
+      return fallback[fallback.length - 1]
+    }
+  }
+  return text
+}
+
+const hasActiveJobs = computed(() => jobs.value.some((item) => ['queued', 'running'].includes(item.status)))
 
 const stopPolling = () => {
   if (pollingTimer) {
@@ -278,21 +458,46 @@ const stopPolling = () => {
 }
 
 const startPollingIfNeeded = () => {
-  if (!hasRunningJobs.value) {
+  if (!hasActiveJobs.value) {
     stopPolling()
     return
   }
-  if (pollingTimer) {
-    return
-  }
+  if (pollingTimer) return
   pollingTimer = setInterval(() => {
     loadJobs(false)
   }, 8000)
 }
 
+const applySystemDefaults = () => {
+  const defaults = systemSettings.value?.sora || {}
+  if (defaults.default_group_title) {
+    selectedGroupTitle.value = defaults.default_group_title
+    createForm.value.group_title = defaults.default_group_title
+  }
+  if (defaults.default_duration) {
+    createForm.value.duration = defaults.default_duration
+  }
+  if (defaults.default_aspect_ratio) {
+    createForm.value.aspect_ratio = defaults.default_aspect_ratio
+  }
+}
+
+const loadSystemSettings = async () => {
+  try {
+    const envelope = await getSystemSettings()
+    systemSettings.value = envelope?.data || null
+    applySystemDefaults()
+  } catch {
+    systemSettings.value = null
+  }
+}
+
 const normalizeProgress = (item) => {
-  const raw = item?.progress
+  const raw = item?.progress_pct
   if (typeof raw === 'number' && !Number.isNaN(raw)) {
+    if (raw <= 1) {
+      return Math.min(100, Math.max(0, Math.round(raw * 100)))
+    }
     return Math.min(100, Math.max(0, Math.round(raw)))
   }
   if (item?.status === 'completed') return 100
@@ -302,9 +507,7 @@ const normalizeProgress = (item) => {
 const normalizeJobs = (data) => {
   return (Array.isArray(data) ? data : []).map((item) => ({
     ...item,
-    progress: normalizeProgress(item),
-    publish_status: item?.publish_status || 'queued',
-    task_type: 'video'
+    progress_pct: normalizeProgress(item)
   }))
 }
 
@@ -327,8 +530,11 @@ const loadJobs = async (withLoading = true) => {
     loading.value = true
   }
   try {
-    const data = await listIxBrowserSoraGenerateJobs({
-      group_title: selectedGroupTitle.value || 'Sora',
+    const data = await listSoraJobs({
+      group_title: selectedGroupTitle.value || undefined,
+      status: statusFilter.value,
+      phase: phaseFilter.value,
+      keyword: keyword.value || undefined,
       limit: 100
     })
     jobs.value = normalizeJobs(data)
@@ -345,7 +551,6 @@ const loadJobs = async (withLoading = true) => {
 
 const openCreateDialog = () => {
   createForm.value = {
-    task_type: 'video',
     group_title: selectedGroupTitle.value || 'Sora',
     profile_id: null,
     prompt: '',
@@ -360,10 +565,6 @@ const submitTask = async () => {
     ElMessage.warning('请输入窗口 ID')
     return
   }
-  if (createForm.value.task_type === 'image') {
-    ElMessage.info('图片任务创建接口预留中，当前请先使用视频任务')
-    return
-  }
   const prompt = createForm.value.prompt?.trim()
   if (!prompt) {
     ElMessage.warning('请输入提示词')
@@ -371,13 +572,14 @@ const submitTask = async () => {
   }
   submitting.value = true
   try {
-    await createIxBrowserSoraGenerateJob({
+    await createSoraJob({
       profile_id: createForm.value.profile_id,
       prompt,
       duration: createForm.value.duration,
-      aspect_ratio: createForm.value.aspect_ratio
+      aspect_ratio: createForm.value.aspect_ratio,
+      group_title: createForm.value.group_title || 'Sora'
     })
-    ElMessage.success('任务已创建')
+    ElMessage.success('任务已创建并进入队列')
     createDialogVisible.value = false
     await loadJobs()
   } catch (error) {
@@ -388,19 +590,14 @@ const submitTask = async () => {
 }
 
 const retryJob = async (row) => {
-  if (!row.prompt || !row.profile_id) {
-    ElMessage.warning('缺少重试参数，无法发起重试')
+  if (!row?.job_id) {
+    ElMessage.warning('缺少任务 ID')
     return
   }
   submitting.value = true
   try {
-    await createIxBrowserSoraGenerateJob({
-      profile_id: row.profile_id,
-      prompt: row.prompt,
-      duration: row.duration || '10s',
-      aspect_ratio: row.aspect_ratio || 'landscape'
-    })
-    ElMessage.success(`Job #${row.job_id} 已发起重试`)
+    await retrySoraJob(row.job_id)
+    ElMessage.success(`Job #${row.job_id} 已重新进入队列`)
     await loadJobs()
   } catch (error) {
     ElMessage.error(error?.response?.data?.detail || '重试失败')
@@ -409,82 +606,356 @@ const retryJob = async (row) => {
   }
 }
 
-const retryPublish = async (row) => {
+const retryWatermark = async (row) => {
   if (!row?.job_id) {
     ElMessage.warning('缺少任务 ID')
     return
   }
   submitting.value = true
   try {
-    await publishIxBrowserSoraGenerateJob(row.job_id)
-    ElMessage.success(`Job #${row.job_id} 已触发发布`)
+    await retrySoraJobWatermark(row.job_id)
+    ElMessage.success(`Job #${row.job_id} 已触发去水印重试`)
     await loadJobs()
   } catch (error) {
-    const message = error?.response?.data?.detail || '发布失败'
-    if (message.includes('发布中')) {
-      ElMessage.warning(message)
-      return
-    }
-    ElMessage.error(message)
+    ElMessage.error(error?.response?.data?.detail || '去水印重试失败')
   } finally {
     submitting.value = false
   }
 }
 
-const fetchGenId = async (row) => {
-  if (!row?.job_id) {
-    ElMessage.warning('缺少任务 ID')
-    return
-  }
-  submitting.value = true
+const openLink = (url) => {
+  if (!url) return
+  window.open(url, '_blank', 'noopener')
+}
+
+const openDetail = async (row) => {
+  detailJob.value = row
+  detailEvents.value = []
   try {
-    await fetchIxBrowserSoraGenerationId(row.job_id)
-    ElMessage.success(`Job #${row.job_id} 已触发获取 genid`)
-    await loadJobs()
+    detailEvents.value = await listSoraJobEvents(row.job_id)
   } catch (error) {
-    ElMessage.error(error?.response?.data?.detail || '获取 genid 失败')
-  } finally {
-    submitting.value = false
+    detailEvents.value = []
   }
-}
-
-const openDetail = (row) => {
-  detailText.value = JSON.stringify(row, null, 2)
   detailDrawerVisible.value = true
 }
 
 onMounted(async () => {
+  nowTick.value = Date.now()
+  relativeTimeTimer = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 60000)
+  await loadSystemSettings()
   await loadGroups()
   await loadJobs()
 })
 
 onUnmounted(() => {
+  if (relativeTimeTimer) {
+    clearInterval(relativeTimeTimer)
+    relativeTimeTimer = null
+  }
   stopPolling()
 })
 </script>
 
 <style scoped>
+
 .tasks-page {
-  padding: 2px;
-}
-
-.glass-card {
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.52);
-  background: linear-gradient(140deg, rgba(255, 255, 255, 0.58) 0%, rgba(255, 255, 255, 0.28) 100%);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-}
-
-.filter-card {
-  margin-bottom: 12px;
-}
-
-.filter-row {
+  padding: 0;
+  color: var(--ink);
   display: flex;
+  flex-direction: column;
+  gap: var(--page-gap);
+  background: transparent;
+}
+
+.brand .title {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.concurrency {
+  display: flex;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid var(--border);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.metric .label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.metric .value {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.overview-card.danger {
+  background: linear-gradient(135deg, rgba(255, 242, 242, 0.92), rgba(255, 255, 255, 0.9));
+}
+
+.task-table :deep(.el-table__cell) {
+  vertical-align: middle;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.task-table :deep(.el-progress) {
+  line-height: 1;
+}
+
+.task-table :deep(.el-progress-bar__outer),
+.task-table :deep(.el-progress-bar__inner) {
+  border-radius: 999px;
+}
+
+.task-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 56px;
+}
+
+.task-title {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 0;
+}
+
+.task-id {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.task-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.task-window {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.task-meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.task-time {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.task-prompt {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.task-prompt-empty {
+  color: var(--muted);
+}
+
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 56px;
+}
+
+.status-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-phase {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.status-progress {
+  width: 100%;
+  max-width: 220px;
+}
+
+.status-error {
+  font-size: 11px;
+  color: #b91c1c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.output-cell {
+  display: flex;
+  flex-direction: column;
+  min-height: 52px;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.output-line {
+  width: 100%;
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.output-error {
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+.output-empty {
+  display: inline-block;
+  min-height: 20px;
+  min-width: 1px;
+}
+
+.share-code-link {
+  max-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--accent-strong);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.watermark-link {
+  color: #0f766e;
+}
+
+.share-code-link:hover {
+  text-decoration: underline;
+}
+
+.action-cell {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-height: 56px;
+  align-items: center;
+}
+
+.detail-block {
+  margin-bottom: 18px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
+}
+
+.detail-item {
+  background: #f6f7fb;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.detail-item strong {
+  display: block;
+  color: #1f2937;
+  font-size: 14px;
+  margin-top: 4px;
+}
+
+.detail-label {
+  font-size: 12px;
+  color: #8b95a7;
+  margin-bottom: 6px;
+}
+
+.detail-text {
+  background: #fff;
+  border-radius: 12px;
+  padding: 12px;
+  border: 1px solid rgba(203, 213, 225, 0.5);
+  font-size: 13px;
+}
+
+.event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.event-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid rgba(203, 213, 225, 0.5);
+}
+
+.event-time {
+  font-size: 11px;
+  color: #8a93a5;
+}
+
+.event-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #52607a;
+}
+
+.event-phase {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.event-message {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.event-empty {
+  padding: 12px;
+  font-size: 12px;
+  color: #8a93a5;
 }
 
 .w-140 {
@@ -499,36 +970,30 @@ onUnmounted(() => {
   width: 260px;
 }
 
-.table-card :deep(.el-card__body) {
-  padding-top: 8px;
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-.table-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
+@media (max-width: 980px) {
+  .command-bar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 
-.task-link {
-  color: #0b5ad8;
-  text-decoration: none;
-}
+  .command-right {
+    width: 100%;
+    justify-content: space-between;
+  }
 
-.task-link:hover {
-  text-decoration: underline;
-}
-
-.detail-json {
-  margin: 0;
-  padding: 12px;
-  border-radius: 10px;
-  background: #0f172a;
-  color: #e2e8f0;
-  max-height: calc(100vh - 170px);
-  overflow: auto;
-}
-
-.table-card :deep(.el-progress__text) {
-  font-size: 11px;
+  .overview {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
 }
 </style>

@@ -20,7 +20,7 @@
             <strong>{{ currentRunId }}</strong>
           </div>
           <div class="meta-info">
-            <span>扫描时间</span>
+            <span>最新批次</span>
             <strong>{{ lastScannedAt }}</strong>
           </div>
           <div class="meta-info" v-if="selectedGroup">
@@ -61,66 +61,84 @@
       </article>
     </section>
 
-    <section class="result-panel" v-loading="latestLoading || scanLoading">
-      <div class="panel-header">
-        <div>
-          <div class="panel-title">窗口扫描结果</div>
-          <div class="panel-subtitle">展示当前分组的最新扫描数据</div>
+    <el-card class="table-card" v-loading="latestLoading || scanLoading">
+      <template #header>
+        <div class="table-head stack">
+          <span>窗口扫描结果</span>
+          <span class="table-hint">实时使用与最近扫描会自动汇总到这里</span>
         </div>
-        <div class="panel-actions" />
-      </div>
+      </template>
 
       <el-table
         v-if="scanRows.length"
         :data="scanRows"
-        border
-        stripe
-        height="560"
-        class="scan-table"
+        class="scan-table card-table"
         :row-class-name="getRowClass"
-        @row-click="viewSession"
       >
-        <el-table-column prop="profile_id" label="窗口ID" width="90" />
-        <el-table-column prop="window_name" label="窗口名" min-width="160" show-overflow-tooltip />
-        <el-table-column prop="account" label="账号" min-width="200" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.account || '-' }}</template>
-        </el-table-column>
-        <el-table-column prop="quota_remaining_count" label="可用次数" width="100">
-          <template #default="{ row }">{{ row.quota_remaining_count ?? '-' }}</template>
-        </el-table-column>
-        <el-table-column label="数据来源" width="100">
+        <el-table-column label="窗口" min-width="360">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.fallback_applied ? 'warning' : 'success'">
-              {{ row.fallback_applied ? '回填' : '本次' }}
-            </el-tag>
+            <div class="window-card">
+              <div class="window-title">
+                <span class="window-name">{{ row.window_name || '-' }}</span>
+                <span class="window-id">ID {{ row.profile_id }}</span>
+              </div>
+              <div class="window-account">{{ row.account || '未识别账号' }}</div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="session_status" label="Session" width="90">
+        <el-table-column label="可用次数" width="170" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.session_status === 200 ? 'success' : 'info'">
-              {{ row.session_status ?? '-' }}
-            </el-tag>
+            <div class="quota-card">
+              <div class="quota-primary">
+                <span class="quota-primary-value">{{ estimateVideos(row) }}</span>
+                <span v-if="estimateVideos(row) !== '-'" class="quota-primary-unit">条</span>
+              </div>
+              <div class="quota-secondary">{{ getQuotaRemainingText(row) }}</div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="结果" width="90">
+        <el-table-column label="套餐" width="118" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.success ? 'success' : 'danger'">{{ row.success ? '成功' : '失败' }}</el-tag>
+            <span v-if="isPlusPlan(row)" class="plan-badge">Plus</span>
           </template>
         </el-table-column>
-        <el-table-column prop="duration_ms" label="耗时(ms)" width="100" />
-        <el-table-column label="错误" min-width="160" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.error || row.quota_error || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="详情" fixed="right" width="86">
+        <el-table-column label="更新时间" width="150" align="center">
           <template #default="{ row }">
-            <el-button size="small" @click.stop="viewSession(row)">查看</el-button>
+            <span class="updated-relative">{{ formatUpdatedTime(row.scanned_at) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源 / 状态" width="188">
+          <template #default="{ row }">
+            <div class="status-stack">
+              <el-tag size="small" effect="light" class="source-tag" :class="getSourceClass(row)">
+                {{ getSourceLabel(row) }}
+              </el-tag>
+              <el-tag size="small" :type="row.session_status === 200 ? 'success' : 'info'">
+                {{ row.session_status ?? '-' }}
+              </el-tag>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" fixed="right" width="210" align="center" class-name="detail-column" label-class-name="detail-column-header">
+          <template #default="{ row }">
+            <div class="action-buttons">
+              <el-button
+                size="small"
+                class="btn-soft"
+                :loading="isOpeningProfile(row.profile_id)"
+                @click.stop="openWindow(row)"
+              >
+                打开窗口
+              </el-button>
+              <el-button size="small" class="btn-soft" @click.stop="viewSession(row)">查看</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
       <el-empty v-else description="暂无扫描结果" :image-size="90">
         <el-button type="primary" :loading="scanLoading" @click="scanNow">立即扫描</el-button>
       </el-empty>
-    </section>
+    </el-card>
 
     <el-dialog v-model="sessionDialogVisible" title="Session / Quota 详情" width="900px">
       <pre class="session-preview">{{ currentSessionText }}</pre>
@@ -129,25 +147,55 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { formatRelativeTimeZh } from '../utils/relativeTime'
 import {
   getIxBrowserGroupWindows,
   getLatestIxBrowserSoraSessionAccounts,
-  scanIxBrowserSoraSessionAccounts
+  openIxBrowserProfileWindow,
+  scanIxBrowserSoraSessionAccounts,
+  getSystemSettings
 } from '../api'
 
 const latestLoading = ref(false)
 const scanLoading = ref(false)
+const realtimeStatus = ref('disconnected')
+let realtimeSource = null
+let relativeTimeTimer = null
+const cachePrefix = 'sora_accounts_cache_'
+const nowTick = ref(Date.now())
 
 const groups = ref([])
 const selectedGroupTitle = ref('Sora')
 const scanData = ref(null)
+const systemSettings = ref(null)
 
 const sessionDialogVisible = ref(false)
 const currentSessionText = ref('')
+const openingProfileIds = ref({})
 
-const scanRows = computed(() => scanData.value?.results || [])
+const parseScanTime = (value) => {
+  if (!value) return 0
+  const raw = String(value).trim()
+  if (!raw) return 0
+  let ms = Date.parse(raw)
+  if (!Number.isNaN(ms)) return ms
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) {
+    ms = Date.parse(raw.replace(' ', 'T'))
+    if (!Number.isNaN(ms)) return ms
+  }
+  return 0
+}
+
+const scanRows = computed(() => {
+  const rows = scanData.value?.results || []
+  return [...rows].sort((a, b) => {
+    const timeDiff = parseScanTime(b?.scanned_at) - parseScanTime(a?.scanned_at)
+    if (timeDiff !== 0) return timeDiff
+    return Number(b?.profile_id || 0) - Number(a?.profile_id || 0)
+  })
+})
 const selectedGroup = computed(() => groups.value.find((g) => g.title === selectedGroupTitle.value) || null)
 
 const metrics = computed(() => {
@@ -194,6 +242,25 @@ const formatTime = (value) => {
   }
 }
 
+const formatUpdatedTime = (value) => formatRelativeTimeZh(value, nowTick.value)
+
+const applySystemDefaults = () => {
+  const defaults = systemSettings.value?.scan || {}
+  if (defaults.default_group_title) {
+    selectedGroupTitle.value = defaults.default_group_title
+  }
+}
+
+const loadSystemSettings = async () => {
+  try {
+    const envelope = await getSystemSettings()
+    systemSettings.value = envelope?.data || null
+    applySystemDefaults()
+  } catch {
+    systemSettings.value = null
+  }
+}
+
 const loadGroups = async () => {
   try {
     const data = await getIxBrowserGroupWindows()
@@ -216,14 +283,53 @@ const loadLatest = async () => {
   try {
     const data = await getLatestIxBrowserSoraSessionAccounts(selectedGroupTitle.value, true)
     scanData.value = data
+    saveCache(selectedGroupTitle.value, data)
   } catch (error) {
     if (error?.response?.status === 404) {
-      scanData.value = null
       return
     }
     ElMessage.error(error?.response?.data?.detail || '获取最新结果失败')
   } finally {
     latestLoading.value = false
+  }
+}
+
+const stopRealtimeStream = () => {
+  if (realtimeSource) {
+    realtimeSource.close()
+    realtimeSource = null
+  }
+  realtimeStatus.value = 'disconnected'
+}
+
+const startRealtimeStream = () => {
+  stopRealtimeStream()
+  if (!selectedGroupTitle.value) return
+  const token = localStorage.getItem('token')
+  if (!token) return
+  const url = `/api/v1/ixbrowser/sora-session-accounts/stream?group_title=${encodeURIComponent(selectedGroupTitle.value)}&token=${encodeURIComponent(token)}`
+  realtimeSource = new EventSource(url)
+  realtimeStatus.value = 'connecting'
+
+  realtimeSource.addEventListener('update', (event) => {
+    try {
+      const payload = JSON.parse(event.data)
+      scanData.value = payload
+      saveCache(selectedGroupTitle.value, payload)
+      realtimeStatus.value = 'connected'
+    } catch (error) {
+      realtimeStatus.value = 'error'
+    }
+  })
+
+  realtimeSource.addEventListener('ping', () => {
+    if (realtimeStatus.value === 'connecting') {
+      realtimeStatus.value = 'connected'
+    }
+  })
+
+  realtimeSource.onerror = () => {
+    realtimeStatus.value = 'error'
   }
 }
 
@@ -249,12 +355,41 @@ const scanNow = async () => {
 }
 
 const onGroupChange = async () => {
+  loadCache(selectedGroupTitle.value)
   await loadLatest()
+  startRealtimeStream()
+}
+
+const isOpeningProfile = (profileId) => Boolean(openingProfileIds.value[profileId])
+
+const openWindow = async (row) => {
+  const profileId = Number(row?.profile_id)
+  if (!Number.isFinite(profileId) || profileId <= 0) {
+    ElMessage.error('无效窗口 ID')
+    return
+  }
+  if (openingProfileIds.value[profileId]) return
+  openingProfileIds.value = {
+    ...openingProfileIds.value,
+    [profileId]: true
+  }
+  try {
+    const groupTitle = selectedGroupTitle.value || row?.group_title || 'Sora'
+    await openIxBrowserProfileWindow(profileId, groupTitle)
+    ElMessage.success(`窗口 ${profileId} 已打开`)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.detail || '打开窗口失败')
+  } finally {
+    const nextState = { ...openingProfileIds.value }
+    delete nextState[profileId]
+    openingProfileIds.value = nextState
+  }
 }
 
 const viewSession = (row) => {
   const payload = {
     account: row.account || null,
+    account_plan: row.account_plan || null,
     session_status: row.session_status || null,
     fallback_applied: row.fallback_applied || false,
     fallback_run_id: row.fallback_run_id || null,
@@ -274,47 +409,101 @@ const viewSession = (row) => {
 }
 
 const getRowClass = ({ row }) => {
-  if (row?.success === false) return 'row-failed'
+  if (row?.quota_source === 'realtime') return 'row-realtime'
   if (row?.fallback_applied) return 'row-fallback'
+  if (row?.success === false) return 'row-failed'
   if (row?.success === true) return 'row-success'
   return ''
 }
 
+const getSourceLabel = (row) => {
+  if (row?.quota_source === 'realtime') return '实时使用'
+  if (row?.fallback_applied) return '回填'
+  return '最近扫描'
+}
+
+const getSourceClass = (row) => {
+  if (row?.quota_source === 'realtime') return 'source-realtime'
+  if (row?.fallback_applied) return 'source-fallback'
+  return 'source-recent'
+}
+
+const estimateVideos = (row) => {
+  const count = row?.quota_remaining_count
+  if (typeof count !== 'number' || Number.isNaN(count)) return '-'
+  return Math.floor(count / 2)
+}
+
+const getQuotaRemainingText = (row) => {
+  const count = row?.quota_remaining_count
+  if (typeof count !== 'number' || Number.isNaN(count)) return '-'
+  return String(count)
+}
+
+const isPlusPlan = (row) => String(row?.account_plan || '').trim().toLowerCase() === 'plus'
+
+const loadCache = (groupTitle) => {
+  if (!groupTitle) return
+  try {
+    const raw = localStorage.getItem(`${cachePrefix}${groupTitle}`)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && parsed.results) {
+      scanData.value = parsed
+    }
+  } catch {
+  }
+}
+
+const saveCache = (groupTitle, data) => {
+  if (!groupTitle || !data) return
+  try {
+    localStorage.setItem(`${cachePrefix}${groupTitle}`, JSON.stringify(data))
+  } catch {
+  }
+}
+
 onMounted(async () => {
+  nowTick.value = Date.now()
+  relativeTimeTimer = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 60000)
+  await loadSystemSettings()
+  loadCache(selectedGroupTitle.value)
   await loadGroups()
+  loadCache(selectedGroupTitle.value)
   await loadLatest()
+  startRealtimeStream()
+})
+
+onBeforeUnmount(() => {
+  if (relativeTimeTimer) {
+    clearInterval(relativeTimeTimer)
+    relativeTimeTimer = null
+  }
+  stopRealtimeStream()
 })
 </script>
 
 <style scoped>
 .ix-page {
-  padding: 6px;
-  min-height: calc(100vh - 80px);
+  padding: 0;
+  min-height: auto;
   background: transparent;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-}
-
-.command-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  background: linear-gradient(135deg, rgba(7, 89, 133, 0.88) 0%, rgba(17, 94, 89, 0.82) 52%, rgba(3, 105, 161, 0.8) 100%);
-  color: #f8fafc;
-  border-radius: 18px;
-  padding: 18px 20px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  gap: var(--page-gap);
+  --accent-realtime: rgba(16, 185, 129, 0.95);
+  --accent-fallback: rgba(245, 158, 11, 0.95);
+  --accent-recent: rgba(100, 116, 139, 0.95);
+  --accent-danger: rgba(248, 113, 113, 0.95);
 }
 
 .command-title {
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
   margin-bottom: 8px;
+  color: var(--ink);
 }
 
 .command-meta {
@@ -332,12 +521,16 @@ onMounted(async () => {
 
 .meta-label {
   font-size: 12px;
-  color: #cbd5e1;
+  color: var(--muted);
+}
+
+.group-select {
+  width: 220px;
 }
 
 .meta-info {
   font-size: 12px;
-  color: #e2e8f0;
+  color: var(--muted);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -345,33 +538,13 @@ onMounted(async () => {
 
 .meta-info strong {
   font-size: 13px;
-  color: #f8fafc;
-}
-
-.group-select {
-  width: 220px;
+  color: var(--ink);
 }
 
 .command-right {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 12px;
-}
-
-.metric-card {
-  background: linear-gradient(140deg, rgba(255, 255, 255, 0.66) 0%, rgba(255, 255, 255, 0.34) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  border-radius: 12px;
-  padding: 12px 14px;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
 }
 
 .metric-card.success {
@@ -382,93 +555,12 @@ onMounted(async () => {
   border-color: #fecaca;
 }
 
-.metric-card.warning {
-  border-color: #fde68a;
-}
-
 .metric-card.accent {
   border-color: #bae6fd;
 }
 
 .metric-card.highlight {
   border-color: #f5d0fe;
-}
-
-.metric-label {
-  display: block;
-  font-size: 12px;
-  color: #64748b;
-}
-
-.metric-value {
-  display: block;
-  margin-top: 6px;
-  font-size: 28px;
-  line-height: 1;
-  color: #0f172a;
-}
-
-.result-panel {
-  background: linear-gradient(140deg, rgba(255, 255, 255, 0.66) 0%, rgba(255, 255, 255, 0.34) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  border-radius: 14px;
-  padding: 14px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-}
-
-.panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.panel-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.panel-subtitle {
-  font-size: 12px;
-  color: #64748b;
-  margin-top: 4px;
-}
-
-.scan-table :deep(.el-table__cell) {
-  font-size: 12px;
-}
-
-.scan-table :deep(.el-table__header-wrapper th) {
-  background: rgba(248, 250, 252, 0.9);
-  color: #0f172a;
-  font-weight: 600;
-}
-
-.scan-table :deep(.el-table__row) {
-  transition: background 0.15s ease;
-  cursor: pointer;
-}
-
-.scan-table :deep(.el-table__row:hover) {
-  background: rgba(14, 165, 233, 0.08);
-}
-
-.scan-table :deep(.el-table__row.row-failed) {
-  background: rgba(248, 113, 113, 0.08);
-}
-
-.scan-table :deep(.el-table__row.row-failed:hover) {
-  background: rgba(248, 113, 113, 0.14);
-}
-
-.scan-table :deep(.el-table__row.row-fallback) {
-  background: rgba(250, 204, 21, 0.08);
-}
-
-.scan-table :deep(.el-table__row.row-success) {
-  background: rgba(34, 197, 94, 0.06);
 }
 
 .session-preview {
@@ -479,6 +571,136 @@ onMounted(async () => {
   color: #e2e8f0;
   padding: 12px;
   border-radius: 8px;
+}
+
+.window-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.window-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.window-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.window-id {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.window-account {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quota-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.quota-primary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.quota-primary-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1;
+}
+
+.quota-primary-unit {
+  font-size: 11px;
+  color: rgba(71, 85, 105, 0.82);
+}
+
+.quota-secondary {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(71, 85, 105, 0.92);
+  line-height: 1.1;
+}
+
+.status-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.updated-relative {
+  display: inline-block;
+  font-size: 12px;
+  color: #475569;
+  font-weight: 600;
+}
+
+.plan-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #075985;
+  border: 1px solid #7dd3fc;
+  background: linear-gradient(135deg, rgba(186, 230, 253, 0.9), rgba(219, 234, 254, 0.92));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 3px 10px rgba(14, 116, 144, 0.16);
+}
+
+.source-tag {
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+
+.source-tag.source-realtime {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.source-tag.source-fallback {
+  background: rgba(245, 158, 11, 0.16);
+  color: #92400e;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.source-tag.source-recent {
+  background: rgba(148, 163, 184, 0.16);
+  color: #475569;
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+.scan-table :deep(td.detail-column .cell),
+.scan-table :deep(th.detail-column-header .cell) {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.action-buttons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 @media (max-width: 1360px) {

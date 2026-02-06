@@ -24,7 +24,7 @@
     />
 
     <el-card class="glass-card table-card" v-loading="loading">
-      <el-table :data="users" border stripe height="560">
+      <el-table :data="users" class="card-table">
         <el-table-column prop="id" label="ID" width="76" />
         <el-table-column prop="username" label="用户名" min-width="150" />
         <el-table-column prop="role" label="角色" width="96" />
@@ -143,21 +143,6 @@ const formatTime = (value) => {
 
 const isCurrentUser = (row) => Number(row.id) === Number(currentUser.value?.id)
 
-const fallbackUsers = () => {
-  const now = new Date().toISOString()
-  users.value = [
-    {
-      id: currentUser.value?.id || 1,
-      username: currentUser.value?.username || 'Admin',
-      role: 'admin',
-      is_active: true,
-      last_login_at: now,
-      created_at: now,
-      updated_at: now
-    }
-  ]
-}
-
 const loadUsers = async () => {
   loading.value = true
   try {
@@ -167,7 +152,7 @@ const loadUsers = async () => {
   } catch (error) {
     if (error?.response?.status === 404) {
       apiReady.value = false
-      fallbackUsers()
+      users.value = []
       return
     }
     ElMessage.error(error?.response?.data?.detail || '读取用户失败')
@@ -253,20 +238,15 @@ onMounted(async () => {
 
 <style scoped>
 .users-page {
-  padding: 2px;
-}
-
-.glass-card {
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.52);
-  background: linear-gradient(140deg, rgba(255, 255, 255, 0.58) 0%, rgba(255, 255, 255, 0.28) 100%);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--page-gap);
+  background: transparent;
 }
 
 .head-card {
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 
 .head-row {
@@ -278,12 +258,12 @@ onMounted(async () => {
 
 .head-row h3 {
   margin: 0;
-  color: #0f172a;
+  color: var(--ink);
 }
 
 .head-row p {
   margin: 6px 0 0;
-  color: #475569;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -294,6 +274,6 @@ onMounted(async () => {
 }
 
 .tip {
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 </style>

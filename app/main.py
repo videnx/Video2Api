@@ -6,13 +6,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
 
-from app.api import auth, ixbrowser
+from app.api import admin, auth, ixbrowser, sora
 from app.core.config import settings
 from app.core.logger import setup_logging
+from app.db.sqlite import sqlite_db
+from app.services.system_settings import apply_runtime_settings
 
 setup_logging()
 logger = logging.getLogger(__name__)
+apply_runtime_settings()
 
 app = FastAPI(
     title=settings.app_name,
@@ -44,11 +48,54 @@ async def log_requests(request, call_next):
         response.status_code,
         process_time,
     )
+
+    if request.url.path.startswith("/api/"):
+        operator_user_id = None
+        operator_username = None
+        token = request.headers.get("authorization") or ""
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if token:
+            try:
+                payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+                username = payload.get("sub")
+                if username:
+                    user = sqlite_db.get_user_by_username(username)
+                    if user:
+                        operator_user_id = user.get("id")
+                        operator_username = user.get("username")
+            except JWTError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        status = "success" if response.status_code < 400 else "failed"
+        level = "INFO" if response.status_code < 400 else "WARN"
+        try:
+            sqlite_db.create_audit_log(
+                category="api",
+                action="api.request",
+                status=status,
+                level=level,
+                message=f"{request.method} {request.url.path}",
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                duration_ms=int(process_time * 1000),
+                ip=request.client.host if request.client else "unknown",
+                user_agent=request.headers.get("user-agent"),
+                operator_user_id=operator_user_id,
+                operator_username=operator_username,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return response
 
 
 app.include_router(auth.router)
 app.include_router(ixbrowser.router)
+app.include_router(sora.router)
+app.include_router(admin.router)
 
 
 @app.get("/health")

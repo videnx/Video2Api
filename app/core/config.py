@@ -17,6 +17,10 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_file: str = "logs/app.log"
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
+    audit_log_retention_days: int = 3
+    audit_log_cleanup_interval_sec: int = 3600
 
     model_config = SettingsConfigDict(env_file=".env")
 

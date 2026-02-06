@@ -10,24 +10,23 @@
 
       <aside class="sidebar glass-panel">
         <div class="brand-block">
-          <div class="brand-mark">V2</div>
-          <div>
-            <div class="brand-title">Video2Api</div>
-            <div class="brand-subtitle">Admin Console</div>
-          </div>
+          <div class="brand-title">Video2Api</div>
         </div>
 
         <nav class="menu-wrap">
-          <button
-            v-for="item in navItems"
-            :key="item.path"
-            class="menu-item"
-            :class="{ active: route.path === item.path }"
-            @click="go(item.path)"
-          >
-            <span class="menu-dot" />
-            <span>{{ item.label }}</span>
-          </button>
+          <div v-for="group in navGroups" :key="group.title" class="menu-group">
+            <div class="menu-title">{{ group.title }}</div>
+            <button
+              v-for="item in group.items"
+              :key="item.path"
+              class="menu-item"
+              :class="{ active: route.path === item.path }"
+              @click="go(item.path)"
+            >
+              <span class="menu-icon" />
+              <span class="menu-label">{{ item.label }}</span>
+            </button>
+          </div>
         </nav>
 
         <div class="sidebar-foot">
@@ -36,19 +35,24 @@
       </aside>
 
       <main class="main-area">
-        <header class="topbar glass-panel">
-          <div>
-            <div class="page-title">{{ currentPageTitle }}</div>
-            <div class="page-subtitle">Glassmorphism + Ethereal Gradient</div>
-          </div>
-          <div class="top-actions">
-            <span class="user-pill">{{ currentUser?.username || 'Admin' }}</span>
-            <button class="logout-btn" @click="logout">退出</button>
-          </div>
-        </header>
+        <div class="topbar-shell">
+          <header class="topbar glass-panel">
+            <div>
+              <div class="page-title">{{ currentPageTitle }}</div>
+            </div>
+            <div class="top-actions">
+              <span class="user-pill">{{ currentUser?.username || 'Admin' }}</span>
+              <button class="logout-btn" @click="logout">退出</button>
+            </div>
+          </header>
+        </div>
 
         <section class="page-body">
-          <router-view />
+          <div class="page-shell">
+            <div class="page-scroll">
+              <router-view />
+            </div>
+          </div>
         </section>
       </main>
     </template>
@@ -62,11 +66,23 @@ import { useRoute, useRouter } from 'vue-router'
 const route = useRoute()
 const router = useRouter()
 
-const navItems = [
-  { path: '/sora-accounts', label: 'Sora 账号管理' },
-  { path: '/tasks', label: '任务管理' },
-  { path: '/users', label: '用户管理' },
-  { path: '/settings', label: '系统设置' }
+const navGroups = [
+  {
+    title: '账号',
+    items: [{ path: '/sora-accounts', label: 'Sora 账号管理' }]
+  },
+  {
+    title: '任务',
+    items: [{ path: '/tasks', label: '任务管理' }]
+  },
+  {
+    title: '系统',
+    items: [
+      { path: '/users', label: '用户管理' },
+      { path: '/settings', label: '系统设置' },
+      { path: '/logs', label: '日志中心' }
+    ]
+  }
 ]
 
 const isLoginPage = computed(() => route.path === '/login')
@@ -96,10 +112,7 @@ const logout = () => {
 .console-root {
   min-height: 100vh;
   display: flex;
-  background:
-    radial-gradient(1200px 600px at 12% -8%, rgba(39, 164, 243, 0.34), transparent 68%),
-    radial-gradient(900px 520px at 92% 4%, rgba(19, 196, 170, 0.2), transparent 62%),
-    linear-gradient(155deg, #ebf8ff 0%, #edf7f6 50%, #f6f9ff 100%);
+  background: transparent;
   position: relative;
   overflow: hidden;
 }
@@ -108,16 +121,16 @@ const logout = () => {
   position: fixed;
   border-radius: 999px;
   pointer-events: none;
-  filter: blur(18px);
-  opacity: 0.6;
+  filter: blur(22px);
+  opacity: 0.5;
 }
 
 .orb-a {
   width: 320px;
   height: 320px;
-  left: 52%;
-  top: -120px;
-  background: rgba(45, 152, 236, 0.22);
+  left: 54%;
+  top: -140px;
+  background: rgba(14, 165, 164, 0.18);
 }
 
 .orb-b {
@@ -125,7 +138,7 @@ const logout = () => {
   height: 280px;
   left: 2%;
   bottom: 24px;
-  background: rgba(33, 208, 174, 0.17);
+  background: rgba(245, 158, 11, 0.16);
 }
 
 .orb-c {
@@ -133,61 +146,61 @@ const logout = () => {
   height: 300px;
   right: -90px;
   bottom: 10%;
-  background: rgba(98, 148, 244, 0.19);
+  background: rgba(59, 130, 246, 0.12);
 }
 
 .glass-panel {
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  background: linear-gradient(140deg, rgba(255, 255, 255, 0.52) 0%, rgba(255, 255, 255, 0.24) 100%);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
-  box-shadow: 0 18px 38px rgba(16, 24, 40, 0.1);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-xs);
 }
 
 .sidebar {
-  width: 252px;
-  margin: 14px;
-  border-radius: 20px;
+  width: 236px;
+  margin: 16px;
+  border-radius: var(--radius-xl);
   padding: 18px 14px;
   display: flex;
   flex-direction: column;
   z-index: 1;
+  background: var(--card);
+  box-shadow: var(--shadow-soft);
 }
 
 .brand-block {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 20px;
-}
-
-.brand-mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  color: #f8fafc;
-  font-weight: 700;
-  background: linear-gradient(155deg, #0c4a6e 0%, #0f766e 100%);
-  box-shadow: 0 8px 20px rgba(12, 74, 110, 0.34);
+  padding: 2px 6px 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.28);
 }
 
 .brand-title {
-  color: #0f172a;
-  font-weight: 700;
-  letter-spacing: 0.2px;
-}
-
-.brand-subtitle {
-  font-size: 12px;
-  color: #475569;
+  color: var(--ink);
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  font-size: 18px;
 }
 
 .menu-wrap {
   display: flex;
   flex-direction: column;
+  gap: 14px;
+}
+
+.menu-group {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+}
+
+.menu-title {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(15, 23, 42, 0.4);
+  padding: 0 8px;
 }
 
 .menu-item {
@@ -196,41 +209,43 @@ const logout = () => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 11px 12px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
   font-size: 14px;
-  background: rgba(255, 255, 255, 0.38);
-  color: #0f172a;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--ink);
   cursor: pointer;
   transition: all 0.2s ease;
+  position: relative;
 }
 
-.menu-dot {
+.menu-icon {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.35);
+  background: rgba(15, 23, 42, 0.28);
 }
 
 .menu-item:hover {
   transform: translateX(2px);
-  background: rgba(255, 255, 255, 0.58);
-  border-color: rgba(148, 163, 184, 0.35);
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(14, 165, 164, 0.4);
 }
 
 .menu-item.active {
-  color: #083344;
-  background: linear-gradient(120deg, rgba(255, 255, 255, 0.7) 0%, rgba(207, 250, 254, 0.52) 100%);
-  border-color: rgba(103, 232, 249, 0.42);
+  color: var(--accent-strong);
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(14, 165, 164, 0.45);
+  box-shadow: var(--shadow-xs);
 }
 
-.menu-item.active .menu-dot {
-  background: #0e7490;
+.menu-item.active .menu-icon {
+  background: var(--accent);
 }
 
 .sidebar-foot {
   margin-top: auto;
-  color: #475569;
+  color: rgba(15, 23, 42, 0.6);
   font-size: 12px;
   padding: 8px 4px 0;
 }
@@ -239,14 +254,19 @@ const logout = () => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 14px 14px 14px 0;
+  padding: 0 16px 16px 0;
   min-width: 0;
+  gap: 12px;
+}
+
+.topbar-shell {
+  padding: var(--page-padding) var(--page-padding) 0;
 }
 
 .topbar {
   min-height: 74px;
-  border-radius: 18px;
-  padding: 12px 16px;
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -256,14 +276,9 @@ const logout = () => {
 .page-title {
   font-size: 18px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--ink);
 }
 
-.page-subtitle {
-  font-size: 12px;
-  color: #475569;
-  margin-top: 4px;
-}
 
 .top-actions {
   display: flex;
@@ -274,9 +289,9 @@ const logout = () => {
 .user-pill {
   padding: 8px 12px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.52);
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  color: #0f172a;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  color: var(--ink);
   font-weight: 600;
 }
 
@@ -285,15 +300,26 @@ const logout = () => {
   border-radius: 10px;
   padding: 9px 13px;
   cursor: pointer;
-  color: #f8fafc;
+  color: #fff;
   background: linear-gradient(140deg, #0f172a 0%, #1f2937 100%);
 }
 
 .page-body {
   flex: 1;
-  overflow: auto;
-  margin-top: 12px;
+  overflow: visible;
+  margin-top: 0;
   z-index: 1;
+}
+
+.page-shell {
+  height: 100%;
+  overflow: visible;
+}
+
+.page-scroll {
+  height: 100%;
+  overflow: auto;
+  padding: var(--page-padding);
 }
 
 @media (max-width: 1080px) {

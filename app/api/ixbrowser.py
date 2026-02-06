@@ -1,15 +1,23 @@
 """ixBrowser 业务接口"""
+import asyncio
+import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
+from jose import JWTError, jwt
 
 from app.core.auth import get_current_active_user
+from app.core.config import settings
+from app.db.sqlite import sqlite_db
 from app.models.ixbrowser import (
     IXBrowserGenerateJob,
     IXBrowserGenerateJobCreateResponse,
     IXBrowserGenerateRequest,
     IXBrowserGroup,
     IXBrowserGroupWindows,
+    IXBrowserOpenProfileResponse,
     IXBrowserScanRunSummary,
     IXBrowserSessionScanResponse,
 )
@@ -22,6 +30,45 @@ from app.services.ixbrowser_service import (
 )
 
 router = APIRouter(prefix="/api/v1/ixbrowser", tags=["ixBrowser"])
+
+
+def _request_meta(request: Request) -> dict:
+    return {
+        "ip": request.client.host if request.client else "unknown",
+        "user_agent": request.headers.get("user-agent"),
+    }
+
+
+def _log_audit(
+    *,
+    request: Request,
+    current_user: dict,
+    action: str,
+    status: str,
+    level: str = "INFO",
+    message: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> None:
+    meta = _request_meta(request)
+    try:
+        sqlite_db.create_audit_log(
+            category="audit",
+            action=action,
+            status=status,
+            level=level,
+            message=message,
+            ip=meta["ip"],
+            user_agent=meta["user_agent"],
+            resource_type=resource_type,
+            resource_id=resource_id,
+            operator_user_id=current_user.get("id") if current_user else None,
+            operator_username=current_user.get("username") if current_user else None,
+            extra=extra,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.get("/groups", response_model=List[IXBrowserGroup])
@@ -44,23 +91,140 @@ async def get_ixbrowser_group_windows(current_user: dict = Depends(get_current_a
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.post("/profiles/{profile_id}/open", response_model=IXBrowserOpenProfileResponse)
+async def open_ixbrowser_profile_window(
+    profile_id: int,
+    request: Request,
+    group_title: str = Query("Sora", description="分组名称"),
+    current_user: dict = Depends(get_current_active_user),
+):
+    try:
+        result = await ixbrowser_service.open_profile_window(profile_id=profile_id, group_title=group_title)
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.profile.open",
+                status="success",
+                message="打开窗口",
+                resource_type="profile",
+                resource_id=str(profile_id),
+                extra={"group_title": group_title, "window_name": result.window_name},
+            )
+        return result
+    except IXBrowserNotFoundError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.profile.open",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(profile_id),
+                extra={"group_title": group_title},
+            )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IXBrowserAPIError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.profile.open",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(profile_id),
+                extra={"group_title": group_title},
+            )
+        raise HTTPException(status_code=502, detail=f"ixBrowser 返回错误（code={exc.code}）：{exc.message}") from exc
+    except IXBrowserConnectionError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.profile.open",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(profile_id),
+                extra={"group_title": group_title},
+            )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/sora-session-accounts", response_model=IXBrowserSessionScanResponse)
 async def get_sora_session_accounts(
+    request: Request,
     group_title: str = Query("Sora", description="要扫描的分组名称"),
     with_fallback: bool = Query(True, description="是否应用历史成功结果回填"),
     current_user: dict = Depends(get_current_active_user),
 ):
     try:
-        return await ixbrowser_service.scan_group_sora_sessions(
+        result = await ixbrowser_service.scan_group_sora_sessions(
             group_title=group_title,
             operator_user=current_user,
             with_fallback=with_fallback,
         )
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.scan",
+                status="success",
+                message="Sora 账号扫描完成",
+                resource_type="group",
+                resource_id=group_title,
+                extra={
+                    "run_id": result.run_id,
+                    "total_windows": result.total_windows,
+                    "success_count": result.success_count,
+                    "failed_count": result.failed_count,
+                    "fallback_applied_count": result.fallback_applied_count,
+                },
+            )
+        return result
     except IXBrowserNotFoundError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.scan",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="group",
+                resource_id=group_title,
+            )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IXBrowserAPIError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.scan",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="group",
+                resource_id=group_title,
+            )
         raise HTTPException(status_code=502, detail=f"ixBrowser 返回错误（code={exc.code}）：{exc.message}") from exc
     except IXBrowserConnectionError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.scan",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="group",
+                resource_id=group_title,
+            )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
@@ -78,6 +242,48 @@ async def get_latest_sora_session_accounts(
         raise HTTPException(status_code=502, detail=f"ixBrowser 返回错误（code={exc.code}）：{exc.message}") from exc
     except IXBrowserConnectionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/sora-session-accounts/stream")
+async def stream_sora_session_accounts(
+    group_title: str = Query("Sora", description="分组名称"),
+    token: Optional[str] = Query(None, description="访问令牌"),
+):
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少访问令牌")
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        username = payload.get("sub")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="无效的访问令牌") from exc
+
+    if not username or not sqlite_db.get_user_by_username(username):
+        raise HTTPException(status_code=401, detail="无效的访问令牌")
+
+    queue = ixbrowser_service._register_realtime_subscriber()
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if isinstance(payload, dict):
+                    payload_group = payload.get("group_title")
+                    if payload_group and payload_group != group_title:
+                        continue
+                try:
+                    data = ixbrowser_service.get_latest_sora_scan(group_title=group_title, with_fallback=True)
+                except Exception:  # noqa: BLE001
+                    continue
+                payload_json = json.dumps(jsonable_encoder(data), ensure_ascii=False)
+                yield f"event: update\\ndata: {payload_json}\\n\\n"
+        finally:
+            ixbrowser_service._unregister_realtime_subscriber(queue)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/sora-session-accounts/history", response_model=List[IXBrowserScanRunSummary])
@@ -113,17 +319,78 @@ async def get_sora_session_accounts_by_run(
 @router.post("/sora-generate", response_model=IXBrowserGenerateJobCreateResponse)
 async def create_sora_generate_job(
     request: IXBrowserGenerateRequest,
+    http_request: Request,
     current_user: dict = Depends(get_current_active_user),
 ):
     try:
-        return await ixbrowser_service.create_sora_generate_job(request=request, operator_user=current_user)
+        result = await ixbrowser_service.create_sora_generate_job(request=request, operator_user=current_user)
+        if http_request:
+            _log_audit(
+                request=http_request,
+                current_user=current_user,
+                action="ixbrowser.generate.create",
+                status="success",
+                message="创建生成任务",
+                resource_type="job",
+                resource_id=str(result.job.job_id),
+                extra={
+                    "profile_id": request.profile_id,
+                    "duration": request.duration,
+                    "aspect_ratio": request.aspect_ratio,
+                },
+            )
+        return result
     except IXBrowserNotFoundError as exc:
+        if http_request:
+            _log_audit(
+                request=http_request,
+                current_user=current_user,
+                action="ixbrowser.generate.create",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(request.profile_id),
+            )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IXBrowserServiceError as exc:
+        if http_request:
+            _log_audit(
+                request=http_request,
+                current_user=current_user,
+                action="ixbrowser.generate.create",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(request.profile_id),
+            )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except IXBrowserAPIError as exc:
+        if http_request:
+            _log_audit(
+                request=http_request,
+                current_user=current_user,
+                action="ixbrowser.generate.create",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(request.profile_id),
+            )
         raise HTTPException(status_code=502, detail=f"ixBrowser 返回错误（code={exc.code}）：{exc.message}") from exc
     except IXBrowserConnectionError as exc:
+        if http_request:
+            _log_audit(
+                request=http_request,
+                current_user=current_user,
+                action="ixbrowser.generate.create",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="profile",
+                resource_id=str(request.profile_id),
+            )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
@@ -143,34 +410,146 @@ async def get_sora_generate_job(
 @router.post("/sora-generate-jobs/{job_id}/publish", response_model=IXBrowserGenerateJob)
 async def retry_sora_publish_job(
     job_id: int,
+    request: Request,
     current_user: dict = Depends(get_current_active_user),
 ):
     try:
-        return await ixbrowser_service.retry_sora_publish_job(job_id)
+        result = await ixbrowser_service.retry_sora_publish_job(job_id)
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.publish",
+                status="success",
+                message="发布任务",
+                resource_type="job",
+                resource_id=str(job_id),
+            )
+        return result
     except IXBrowserNotFoundError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.publish",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IXBrowserServiceError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.publish",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except IXBrowserAPIError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.publish",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=502, detail=f"ixBrowser 返回错误（code={exc.code}）：{exc.message}") from exc
     except IXBrowserConnectionError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.publish",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/sora-generate-jobs/{job_id}/genid", response_model=IXBrowserGenerateJob)
 async def fetch_sora_generation_id(
     job_id: int,
+    request: Request,
     current_user: dict = Depends(get_current_active_user),
 ):
     try:
-        return await ixbrowser_service.fetch_sora_generation_id(job_id)
+        result = await ixbrowser_service.fetch_sora_generation_id(job_id)
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.genid",
+                status="success",
+                message="获取 GenID",
+                resource_type="job",
+                resource_id=str(job_id),
+            )
+        return result
     except IXBrowserNotFoundError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.genid",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IXBrowserServiceError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.genid",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except IXBrowserAPIError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.genid",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=502, detail=f"ixBrowser 返回错误（code={exc.code}）：{exc.message}") from exc
     except IXBrowserConnectionError as exc:
+        if request:
+            _log_audit(
+                request=request,
+                current_user=current_user,
+                action="ixbrowser.generate.genid",
+                status="failed",
+                level="WARN",
+                message=str(exc),
+                resource_type="job",
+                resource_id=str(job_id),
+            )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

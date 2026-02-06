@@ -1,8 +1,10 @@
 <template>
   <div class="login-wrap">
     <div class="login-card">
-      <h1>Video2Api</h1>
-      <p>默认账号密码：Admin / Admin</p>
+      <div class="brand-lockup">
+        <h1>Video2Api</h1>
+        <p>Admin / Admin</p>
+      </div>
       <el-form @submit.prevent>
         <el-form-item>
           <el-input v-model="username" placeholder="用户名" />
@@ -52,32 +54,31 @@ const doLogin = async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background:
-    radial-gradient(820px 420px at 10% -2%, rgba(59, 130, 246, 0.24), transparent 68%),
-    radial-gradient(860px 420px at 94% 8%, rgba(20, 184, 166, 0.24), transparent 64%),
-    linear-gradient(150deg, #edf7ff 0%, #eef9f7 48%, #f6f9ff 100%);
+  background: transparent;
 }
 
 .login-card {
   width: 360px;
-  background: linear-gradient(140deg, rgba(255, 255, 255, 0.58) 0%, rgba(255, 255, 255, 0.3) 100%);
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  border-radius: 16px;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.12);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
   padding: 24px;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
 }
 
 h1 {
   margin: 0;
   font-size: 26px;
-  color: #0f172a;
+  color: var(--ink);
 }
 
-p {
-  margin: 8px 0 18px;
-  color: #64748b;
+.brand-lockup {
+  margin-bottom: 18px;
+}
+
+.brand-lockup p {
+  margin: 8px 0 0;
+  color: var(--muted);
   font-size: 12px;
 }
 </style>

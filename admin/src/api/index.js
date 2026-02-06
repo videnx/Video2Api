@@ -45,6 +45,13 @@ export const getIxBrowserGroupWindows = async () => {
   return response.data
 }
 
+export const openIxBrowserProfileWindow = async (profileId, groupTitle = 'Sora') => {
+  const response = await api.post(`/ixbrowser/profiles/${profileId}/open`, null, {
+    params: { group_title: groupTitle }
+  })
+  return response.data
+}
+
 export const scanIxBrowserSoraSessionAccounts = async (groupTitle = 'Sora') => {
   const response = await api.post('/ixbrowser/sora-session-accounts', null, {
     params: { group_title: groupTitle, with_fallback: true },
@@ -78,6 +85,43 @@ export const createIxBrowserSoraGenerateJob = async (data) => {
   const response = await api.post('/ixbrowser/sora-generate', data, {
     timeout: 60000
   })
+  return response.data
+}
+
+export const createSoraJob = async (data) => {
+  const response = await api.post('/sora/jobs', data, {
+    timeout: 60000
+  })
+  return response.data
+}
+
+export const listSoraJobs = async (params) => {
+  const response = await api.get('/sora/jobs', { params })
+  return response.data
+}
+
+export const getSoraJob = async (jobId) => {
+  const response = await api.get(`/sora/jobs/${jobId}`)
+  return response.data
+}
+
+export const retrySoraJob = async (jobId) => {
+  const response = await api.post(`/sora/jobs/${jobId}/retry`)
+  return response.data
+}
+
+export const cancelSoraJob = async (jobId) => {
+  const response = await api.post(`/sora/jobs/${jobId}/cancel`)
+  return response.data
+}
+
+export const listSoraJobEvents = async (jobId) => {
+  const response = await api.get(`/sora/jobs/${jobId}/events`)
+  return response.data
+}
+
+export const retrySoraJobWatermark = async (jobId) => {
+  const response = await api.post(`/sora/jobs/${jobId}/watermark/retry`)
   return response.data
 }
 
@@ -138,5 +182,20 @@ export const getScanSchedulerConfig = async () => {
 
 export const updateScanSchedulerConfig = async (data) => {
   const response = await api.put('/admin/settings/scheduler/scan', data)
+  return response.data
+}
+
+export const getWatermarkFreeConfig = async () => {
+  const response = await api.get('/admin/settings/watermark-free')
+  return response.data
+}
+
+export const updateWatermarkFreeConfig = async (data) => {
+  const response = await api.put('/admin/settings/watermark-free', data)
+  return response.data
+}
+
+export const listSystemLogs = async (params) => {
+  const response = await api.get('/admin/logs', { params })
   return response.data
 }

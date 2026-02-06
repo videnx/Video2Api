@@ -1,3 +1,6 @@
+import base64
+import json
+
 import pytest
 
 from app.models.ixbrowser import (
@@ -38,6 +41,17 @@ class _FakePlaywrightContext:
         return False
 
 
+def _build_access_token(plan_type: str) -> str:
+    payload = {
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": plan_type,
+        }
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+    return f"header.{encoded}.signature"
+
+
 @pytest.mark.asyncio
 async def test_scan_group_sora_sessions_group_not_found():
     service = IXBrowserService()
@@ -75,7 +89,14 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
         return True
 
     responses = [
-        (200, {"user": {"email": "first@example.com"}}, '{"ok":true}'),
+        (
+            200,
+            {
+                "user": {"email": "first@example.com"},
+                "accessToken": _build_access_token("plus"),
+            },
+            '{"ok":true}',
+        ),
         (401, {"error": "unauthorized"}, '{"error":"unauthorized"}'),
     ]
     quota_responses = [
@@ -97,10 +118,10 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
         },
     ]
 
-    async def _fake_fetch_sora_session(_browser):
+    async def _fake_fetch_sora_session(_browser, _profile_id=None):
         return responses.pop(0)
 
-    async def _fake_fetch_sora_quota(_browser, _session_obj=None):
+    async def _fake_fetch_sora_quota(_browser, _profile_id=None, _session_obj=None):
         return quota_responses.pop(0)
 
     service.list_group_windows = _fake_list_group_windows
@@ -132,6 +153,7 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
     assert result.failed_count == 1
     assert result.run_id == 101
     assert result.results[0].account == "first@example.com"
+    assert result.results[0].account_plan == "plus"
     assert result.results[0].success is True
     assert result.results[1].success is False
     assert result.results[0].close_success is True
@@ -139,6 +161,41 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
     assert result.results[0].quota_remaining_count == 8
     assert result.results[0].quota_error is None
     assert result.results[1].quota_error == "nf/check 状态码 401"
+
+
+@pytest.mark.asyncio
+async def test_open_profile_window_group_not_found():
+    service = IXBrowserService()
+
+    async def _fake_get_window_from_group(_profile_id, _group_title):
+        return None
+
+    service._get_window_from_group = _fake_get_window_from_group
+
+    with pytest.raises(IXBrowserNotFoundError):
+        await service.open_profile_window(profile_id=111, group_title="Sora")
+
+
+@pytest.mark.asyncio
+async def test_open_profile_window_returns_normalized_open_data():
+    service = IXBrowserService()
+
+    async def _fake_get_window_from_group(profile_id, _group_title):
+        return IXBrowserWindow(profile_id=profile_id, name=f"win-{profile_id}")
+
+    async def _fake_open_profile_with_retry(_profile_id, max_attempts=3):
+        return {"debugPort": 9222}
+
+    service._get_window_from_group = _fake_get_window_from_group
+    service._open_profile_with_retry = _fake_open_profile_with_retry
+
+    result = await service.open_profile_window(profile_id=222, group_title="Sora")
+
+    assert result.profile_id == 222
+    assert result.group_title == "Sora"
+    assert result.window_name == "win-222"
+    assert result.debugging_address == "127.0.0.1:9222"
+    assert result.ws is None
 
 
 def test_parse_sora_nf_check_payload():
@@ -156,6 +213,18 @@ def test_parse_sora_nf_check_payload():
     assert parsed["remaining_count"] == 12
     assert parsed["total_count"] == 14
     assert parsed["reset_at"] is not None
+
+
+def test_extract_account_plan_from_access_token():
+    service = IXBrowserService()
+
+    plus = service._extract_account_plan({"accessToken": _build_access_token("plus")})
+    free = service._extract_account_plan({"accessToken": _build_access_token("free")})
+    unknown = service._extract_account_plan({"accessToken": "invalid-token"})
+
+    assert plus == "plus"
+    assert free == "free"
+    assert unknown is None
 
 
 @pytest.mark.asyncio
@@ -200,6 +269,7 @@ def test_apply_fallback_from_history(monkeypatch):
                 "run_id": 11,
                 "run_scanned_at": "2026-02-04 11:00:00",
                 "account": "fallback@example.com",
+                "account_plan": "plus",
                 "quota_remaining_count": 9,
                 "quota_reset_at": "2026-02-05 00:00:00",
             }
@@ -210,6 +280,7 @@ def test_apply_fallback_from_history(monkeypatch):
 
     assert response.fallback_applied_count == 1
     assert response.results[0].account == "fallback@example.com"
+    assert response.results[0].account_plan == "plus"
     assert response.results[0].quota_remaining_count == 9
     assert response.results[0].fallback_applied is True
     assert response.results[0].fallback_run_id == 11
