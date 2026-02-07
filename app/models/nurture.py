@@ -13,8 +13,9 @@ class SoraNurtureBatchCreateRequest(BaseModel):
     scroll_count: int = Field(10, ge=1, le=50)
     like_probability: float = Field(0.25, ge=0, le=1)
     follow_probability: float = Field(0.06, ge=0, le=1)
-    max_follows_per_profile: int = Field(1, ge=0, le=5)
-    max_likes_per_profile: int = Field(3, ge=0, le=10)
+    # 单号上限：默认放宽到 100，方便养号时更自然地分布动作（仍受概率控制）。
+    max_follows_per_profile: int = Field(100, ge=0, le=1000)
+    max_likes_per_profile: int = Field(100, ge=0, le=1000)
 
     @field_validator("name")
     @classmethod
@@ -61,8 +62,8 @@ class SoraNurtureBatch(BaseModel):
     scroll_count: int = 10
     like_probability: float = 0.25
     follow_probability: float = 0.06
-    max_follows_per_profile: int = 1
-    max_likes_per_profile: int = 3
+    max_follows_per_profile: int = 100
+    max_likes_per_profile: int = 100
     status: str
     success_count: int = 0
     failed_count: int = 0
@@ -94,4 +95,3 @@ class SoraNurtureJob(BaseModel):
     finished_at: Optional[str] = None
     created_at: str
     updated_at: str
-

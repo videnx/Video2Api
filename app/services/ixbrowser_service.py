@@ -4418,6 +4418,12 @@ class IXBrowserService:
             else:
                 await route.continue_()
 
+        # 避免同一页面重复注册 route 导致阻断规则不生效/行为不稳定
+        try:
+            await page.unroute("**/*")
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             await page.route("**/*", handle_route)
         except Exception:  # noqa: BLE001

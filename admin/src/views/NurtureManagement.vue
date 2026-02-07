@@ -69,11 +69,11 @@
                 </div>
                 <div class="advanced-item">
                   <div class="advanced-label">单号最多关注</div>
-                  <el-input-number v-model="createForm.max_follows_per_profile" :min="0" :max="5" />
+                  <el-input-number v-model="createForm.max_follows_per_profile" :min="0" :max="1000" />
                 </div>
                 <div class="advanced-item">
                   <div class="advanced-label">单号最多点赞</div>
-                  <el-input-number v-model="createForm.max_likes_per_profile" :min="0" :max="10" />
+                  <el-input-number v-model="createForm.max_likes_per_profile" :min="0" :max="1000" />
                 </div>
               </div>
             </el-form-item>
@@ -282,8 +282,8 @@ const createForm = ref({
   scroll_count: 10,
   like_probability: 0.25,
   follow_probability: 0.06,
-  max_follows_per_profile: 1,
-  max_likes_per_profile: 3
+  max_follows_per_profile: 100,
+  max_likes_per_profile: 100
 })
 
 const batches = ref([])
@@ -697,4 +697,3 @@ onBeforeUnmount(() => {
   }
 }
 </style>
-

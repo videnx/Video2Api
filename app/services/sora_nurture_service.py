@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import random
-import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 
 EXPLORE_URL = "https://sora.chatgpt.com/explore"
 
-LIKE_NAME_RE = re.compile(r"(like|点赞|喜欢|赞)", re.IGNORECASE)
-FOLLOW_NAME_RE = re.compile(r"(follow|关注)", re.IGNORECASE)
+# /p/... 详情以 dialog 弹窗呈现，养号动作在弹窗内完成。
+POST_DIALOG_SELECTOR = '[role="dialog"]'
 
-LIKE_TEXT_BLOCKLIST = ("liked", "unlike", "已赞", "取消", "取消赞")
-FOLLOW_TEXT_BLOCKLIST = ("following", "unfollow", "已关注", "取消", "取消关注")
+# 帖子点赞（不是评论点赞）：心形图标 path.d 前缀特征（实测）。
+POST_LIKE_HEART_D_PREFIX_OUTLINE = "M9 3.991"
+POST_LIKE_HEART_D_PREFIX_FILLED = "M9.48 16.252"
 
 
 def _now_str() -> str:
@@ -399,7 +400,8 @@ class SoraNurtureService:
 
             browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=20_000)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = context.pages[0] if context.pages else await context.new_page()
+            # 使用新页面避免复用旧 tab 遗留的 route/状态导致 Explore 入口加载异常
+            page = await context.new_page()
 
             await self._prepare_page(page, profile_id)
 
@@ -501,6 +503,10 @@ class SoraNurtureService:
     async def _prepare_page(self, page, profile_id: int) -> None:
         user_agent = self._ix._select_iphone_user_agent(profile_id)  # noqa: SLF001
         await self._ix._apply_ua_override(page, user_agent)  # noqa: SLF001
+        try:
+            await page.unroute("**/*")
+        except Exception:  # noqa: BLE001
+            pass
         await self._ix._apply_request_blocking(page)  # noqa: SLF001
 
     async def _check_logged_in(self, page) -> Tuple[bool, str]:
@@ -546,6 +552,9 @@ class SoraNurtureService:
         scroll_done = 0
         canceled = False
 
+        # 进入 /p/... 弹窗（dialog）后，按 ArrowDown 切换作品；刷满 scroll_target 条后退出。
+        await self._ensure_in_post_dialog(page)
+
         for idx in range(int(scroll_target)):
             batch = self._db.get_sora_nurture_batch(int(batch_id)) or {}
             if str(batch.get("status") or "").strip().lower() == "canceled":
@@ -555,7 +564,7 @@ class SoraNurtureService:
             need_like = (like_count < max_likes) and (random.random() < float(like_probability))
             need_follow = (follow_count < max_follows) and (random.random() < float(follow_probability))
 
-            # 执行动作：顺序随机化
+            # 执行动作：顺序随机化（尽量自然）
             actions = []
             if need_like:
                 actions.append("like")
@@ -565,12 +574,12 @@ class SoraNurtureService:
 
             for action in actions:
                 if action == "like":
-                    ok = await self._try_like(page)
+                    ok = await self._try_like_post(page)
                     if ok:
                         like_count += 1
                     continue
                 if action == "follow":
-                    ok = await self._try_follow(page)
+                    ok = await self._try_follow_post(page)
                     if ok:
                         follow_count += 1
                     continue
@@ -586,140 +595,272 @@ class SoraNurtureService:
                 },
             )
 
-            # 滑动 + 随机等待
-            dy = random.randint(700, 1100)
-            await page.evaluate("(delta) => window.scrollBy(0, delta)", dy)
-            await page.wait_for_timeout(random.randint(800, 1600))
-
-            # 偶尔回到 explore 顶部区域，防止长时间停留在未知状态
-            if scroll_done % 4 == 0:
+            # ArrowDown 切换下一条（包含第一条：最后一轮不再切换）
+            if idx < int(scroll_target) - 1:
+                prev = page.url
                 try:
-                    await page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=40_000)
-                    await page.wait_for_timeout(random.randint(600, 1200))
+                    await self._goto_next_post(page, prev_url=prev)
+                    await page.wait_for_timeout(random.randint(700, 1300))
                 except Exception:  # noqa: BLE001
-                    pass
+                    # 若页面状态异常，尝试回到 explore 重新打开弹窗继续
+                    try:
+                        await page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=40_000)
+                        await self._ensure_in_post_dialog(page)
+                    except Exception:  # noqa: BLE001
+                        pass
 
-        return like_count, follow_count, scroll_done, canceled
-
-    async def _try_like(self, page) -> bool:
-        if await self._click_random_button(page, kind="like"):
-            return True
-        return await self._open_random_post_and_click(page, kind="like")
-
-    async def _try_follow(self, page) -> bool:
-        if await self._click_random_button(page, kind="follow"):
-            return True
-        return await self._open_random_post_and_click(page, kind="follow")
-
-    async def _click_random_button(self, page, *, kind: str) -> bool:
-        pattern = LIKE_NAME_RE if kind == "like" else FOLLOW_NAME_RE
-        blocklist = LIKE_TEXT_BLOCKLIST if kind == "like" else FOLLOW_TEXT_BLOCKLIST
-
-        candidates = []
-        # role=button 优先
+        # 退出弹窗回 Explore（失败也不影响任务完成）
         try:
-            locator = page.get_by_role("button", name=pattern)
-            count = await locator.count()
-            for i in range(min(count, 30)):
-                item = locator.nth(i)
-                try:
-                    if not await item.is_visible():
-                        continue
-                except Exception:  # noqa: BLE001
-                    continue
-                try:
-                    pressed = await item.get_attribute("aria-pressed")
-                    if isinstance(pressed, str) and pressed.strip().lower() == "true":
-                        continue
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    text = (await item.inner_text()) or ""
-                    if any(token in text.lower() for token in blocklist):
-                        continue
-                except Exception:  # noqa: BLE001
-                    pass
-                candidates.append(item)
-        except Exception:  # noqa: BLE001
-            candidates = []
-
-        # CSS 兜底（某些按钮不是标准 role）
-        if not candidates:
-            text_variants = ["Like", "点赞", "喜欢", "赞"] if kind == "like" else ["Follow", "关注"]
-            for text in text_variants:
-                try:
-                    locator = page.locator(f"button:has-text('{text}')")
-                    count = await locator.count()
-                    for i in range(min(count, 20)):
-                        item = locator.nth(i)
-                        try:
-                            if await item.is_visible():
-                                candidates.append(item)
-                        except Exception:  # noqa: BLE001
-                            continue
-                except Exception:  # noqa: BLE001
-                    continue
-
-        if not candidates:
-            return False
-
-        target = random.choice(candidates)
-        try:
-            await target.click(timeout=3000)
-            await page.wait_for_timeout(random.randint(500, 1100))
-            return True
-        except Exception:  # noqa: BLE001
-            return False
-
-    async def _open_random_post_and_click(self, page, *, kind: str) -> bool:
-        # 在 explore 页面中找一个 /p/ 链接，直接 goto 进入详情页，再尝试点击
-        try:
-            links = page.locator('a[href*="/p/"]')
-            count = await links.count()
-        except Exception:  # noqa: BLE001
-            return False
-        if not count:
-            return False
-
-        chosen_href = None
-        for _ in range(6):
-            idx = random.randint(0, min(count - 1, 30))
-            item = links.nth(idx)
-            try:
-                href = await item.get_attribute("href")
-                if not href:
-                    continue
-                href = str(href).strip()
-                if not href:
-                    continue
-                if href.startswith("/p/"):
-                    chosen_href = f"https://sora.chatgpt.com{href}"
-                    break
-                if href.startswith("https://sora.chatgpt.com/p/") or href.startswith("http://sora.chatgpt.com/p/"):
-                    chosen_href = href
-                    break
-            except Exception:  # noqa: BLE001
-                continue
-
-        if not chosen_href:
-            return False
-
-        try:
-            await page.goto(chosen_href, wait_until="domcontentloaded", timeout=40_000)
-            await page.wait_for_timeout(random.randint(800, 1400))
-        except Exception:  # noqa: BLE001
-            return False
-
-        ok = await self._click_random_button(page, kind=kind)
-
-        # 返回 explore（不依赖 go_back）
-        try:
-            await page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=40_000)
-            await page.wait_for_timeout(random.randint(500, 900))
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(800)
         except Exception:  # noqa: BLE001
             pass
 
-        return ok
+        return like_count, follow_count, scroll_done, canceled
+
+    async def _ensure_in_post_dialog(self, page, timeout_ms: int = 70_000) -> None:
+        """
+        确保已进入 /p/... 弹窗（role=dialog）。
+
+        注意：Explore 中作品入口是 a[href^="/p/"]，省流模式下可能加载较慢，所以用轮询等待。
+        """
+        # 已在弹窗内
+        if "/p/" in (page.url or ""):
+            try:
+                await page.locator(POST_DIALOG_SELECTOR).first.wait_for(timeout=12_000)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 回到 explore
+        if "/explore" not in (page.url or ""):
+            await page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=40_000)
+
+        await self._wait_for_post_links(page, timeout_ms=timeout_ms)
+        await self._open_random_post_from_explore(page)
+
+        await page.wait_for_url("**/p/**", timeout=25_000)
+        await page.locator(POST_DIALOG_SELECTOR).first.wait_for(timeout=25_000)
+
+    async def _wait_for_post_links(self, page, timeout_ms: int = 70_000) -> None:
+        locator = page.locator('a[href^="/p/"], a[href^="https://sora.chatgpt.com/p/"], a[href^="http://sora.chatgpt.com/p/"]')
+        deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0
+        last_count = 0
+        while time.monotonic() < deadline:
+            try:
+                last_count = await locator.count()
+            except Exception:  # noqa: BLE001
+                last_count = 0
+            if last_count > 0:
+                return
+            await page.wait_for_timeout(900)
+        raise IXBrowserConnectionError(f"Explore 页面未加载出作品入口（/p 链接），count={last_count}")
+
+    async def _open_random_post_from_explore(self, page) -> None:
+        links = page.locator('a[href^="/p/"], a[href^="https://sora.chatgpt.com/p/"], a[href^="http://sora.chatgpt.com/p/"]')
+        count = await links.count()
+        if count <= 0:
+            raise IXBrowserConnectionError("Explore 页面未找到 /p/ 链接")
+
+        max_pick = min(count, 12)
+        idxs = list(range(max_pick))
+        random.shuffle(idxs)
+        last_href = None
+        for idx in idxs:
+            item = links.nth(idx)
+            try:
+                last_href = await item.get_attribute("href")
+            except Exception:
+                last_href = None
+            try:
+                await item.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            try:
+                await item.click(timeout=5000)
+                return
+            except Exception:
+                continue
+
+        # click 失败：兜底直接 goto
+        if isinstance(last_href, str):
+            href = last_href.strip()
+            if href.startswith("/p/"):
+                await page.goto(f"https://sora.chatgpt.com{href}", wait_until="domcontentloaded", timeout=40_000)
+                return
+            if href.startswith("http://") or href.startswith("https://"):
+                await page.goto(href, wait_until="domcontentloaded", timeout=40_000)
+                return
+
+        await links.first.click(timeout=5000)
+
+    async def _goto_next_post(self, page, *, prev_url: str) -> None:
+        await page.keyboard.press("ArrowDown")
+        await page.wait_for_function(
+            "prev => location.href !== prev && location.pathname.startsWith('/p/')",
+            arg=prev_url,
+            timeout=12_000,
+        )
+
+    async def _try_follow_post(self, page) -> bool:
+        """
+        关注：只点弹窗里唯一 aria-label=Follow 的按钮；不存在则跳过。
+        """
+        btn = page.locator(f'{POST_DIALOG_SELECTOR} button[aria-label="Follow"], {POST_DIALOG_SELECTOR} button[aria-label="Following"]')
+        if await btn.count() == 0:
+            return False
+
+        aria0 = (await btn.first.get_attribute("aria-label")) or ""
+        if aria0.strip() == "Following":
+            return False
+
+        try:
+            await btn.first.click(timeout=3000)
+            await page.wait_for_timeout(900)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _try_like_post(self, page) -> bool:
+        """
+        点赞：只点“帖子赞”（信息卡里的心形+数字按钮），禁止点评论区的 aria-label=Like。
+        """
+        mark = await self._mark_post_like_button(page)
+        if not isinstance(mark, dict) or not mark.get("ok"):
+            return False
+        return await self._click_post_like_if_needed(page)
+
+    async def _mark_post_like_button(self, page) -> dict:
+        """
+        在 dialog 中定位“帖子赞”按钮，并加上 data-nurture-post-like=1 标记。
+        """
+        return await page.evaluate(
+            """
+            ({ outlinePrefix, filledPrefix }) => {
+              const dialog = document.querySelector('[role="dialog"]') || document.body;
+              if (!dialog) return { ok: false, reason: 'no dialog' };
+
+              for (const b of dialog.querySelectorAll('button[data-nurture-post-like]')) {
+                b.removeAttribute('data-nurture-post-like');
+              }
+
+              const vw = window.innerWidth, vh = window.innerHeight;
+              const inView = (r) => r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
+
+              function collectCandidates(card) {
+                const out = [];
+                for (const btn of Array.from(card.querySelectorAll('button'))) {
+                  const txt = (btn.innerText || '').trim().replace(/\\s+/g, ' ');
+                  if (!txt || !/^[0-9][0-9.,KkMm]*$/.test(txt)) continue;
+                  const svg = btn.querySelector('svg');
+                  if (!svg) continue;
+                  const path = svg.querySelector('path');
+                  const r = btn.getBoundingClientRect();
+                  if (!inView(r) || r.width < 18 || r.height < 18) continue;
+                  const d = path ? (path.getAttribute('d') || '') : '';
+                  out.push({
+                    btn,
+                    txt,
+                    x: r.x,
+                    d,
+                    fill: path ? (path.getAttribute('fill') || '') : '',
+                    stroke: path ? (path.getAttribute('stroke') || '') : '',
+                  });
+                }
+                return out;
+              }
+
+              function findFollowCard() {
+                const follow = dialog.querySelector('button[aria-label=\"Follow\"], button[aria-label=\"Following\"]');
+                if (!follow) return null;
+                let cur = follow;
+                for (let i = 0; i < 14 && cur; i++) {
+                  const cls = (cur.className || '').toString();
+                  if (cls.includes('bg-token-bg-lighter')) return cur;
+                  cur = cur.parentElement;
+                }
+                return null;
+              }
+
+              const cards = [];
+              const followCard = findFollowCard();
+              if (followCard) cards.push(followCard);
+
+              for (const el of Array.from(dialog.querySelectorAll('[class*=\"bg-token-bg-lighter\"]'))) {
+                if (!cards.includes(el)) cards.push(el);
+                if (cards.length >= 10) break;
+              }
+
+              let best = null;
+              for (const card of cards) {
+                const cands = collectCandidates(card);
+                if (!cands.length) continue;
+
+                const heart = cands.find(c => (c.d || '').startsWith(outlinePrefix) || (c.d || '').startsWith(filledPrefix));
+                if (heart) { best = heart; break; }
+
+                cands.sort((a, b) => a.x - b.x);
+                best = best || cands[0];
+              }
+
+              if (!best) return { ok: false, reason: 'no candidates' };
+              best.btn.setAttribute('data-nurture-post-like', '1');
+              return { ok: true, picked: { txt: best.txt, d: (best.d || '').slice(0, 40), fill: best.fill, stroke: best.stroke } };
+            }
+            """,
+            {
+                "outlinePrefix": POST_LIKE_HEART_D_PREFIX_OUTLINE,
+                "filledPrefix": POST_LIKE_HEART_D_PREFIX_FILLED,
+            },
+        )
+
+    async def _get_post_like_state(self, page) -> Optional[dict]:
+        return await page.evaluate(
+            """
+            () => {
+              const dialog = document.querySelector('[role="dialog"]') || document.body;
+              if (!dialog) return null;
+              const btn = dialog.querySelector('button[data-nurture-post-like=\"1\"]');
+              if (!btn) return null;
+              const svg = btn.querySelector('svg');
+              const path = svg ? svg.querySelector('path') : null;
+              const txt = (btn.innerText || '').trim().replace(/\\s+/g, ' ');
+              return {
+                txt,
+                fill: path ? (path.getAttribute('fill') || '') : '',
+                stroke: path ? (path.getAttribute('stroke') || '') : '',
+                d: path ? (path.getAttribute('d') || '').slice(0, 40) : '',
+              };
+            }
+            """
+        )
+
+    async def _click_post_like_if_needed(self, page) -> bool:
+        btn = page.locator(f'{POST_DIALOG_SELECTOR} button[data-nurture-post-like="1"]')
+        if await btn.count() == 0:
+            return False
+
+        before = await self._get_post_like_state(page)
+        if not before:
+            return False
+
+        # 已点赞：fill 有值且 stroke 为空
+        if str(before.get("fill") or "").strip() and not str(before.get("stroke") or "").strip():
+            return False
+
+        try:
+            await btn.first.click(timeout=3000)
+        except Exception:  # noqa: BLE001
+            return False
+
+        # 等待描边心 -> 实心心（弱依赖计数变化）
+        for _ in range(6):
+            await page.wait_for_timeout(300)
+            after = await self._get_post_like_state(page)
+            if after and str(after.get("fill") or "").strip() and not str(after.get("stroke") or "").strip():
+                return True
+
+        return True
 
     def _calc_batch_stats(self, batch_id: int) -> Dict[str, Any]:
         jobs = self._db.list_sora_nurture_jobs(batch_id=int(batch_id), limit=5000)
@@ -765,8 +906,8 @@ class SoraNurtureService:
             "scroll_count": int(row.get("scroll_count") or 10),
             "like_probability": float(row.get("like_probability") or 0.25),
             "follow_probability": float(row.get("follow_probability") or 0.06),
-            "max_follows_per_profile": int(row.get("max_follows_per_profile") or 1),
-            "max_likes_per_profile": int(row.get("max_likes_per_profile") or 3),
+            "max_follows_per_profile": int(row.get("max_follows_per_profile") or 100),
+            "max_likes_per_profile": int(row.get("max_likes_per_profile") or 100),
             "status": str(row.get("status") or "queued"),
             "success_count": int(row.get("success_count") or 0),
             "failed_count": int(row.get("failed_count") or 0),
