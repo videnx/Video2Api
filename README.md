@@ -50,8 +50,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ## 开发文档与一键命令
 
 - 开发手册：`docs/dev.md`
+- 自测清单（Playwright）：`docs/selftest.md`
 - 一键启动（Makefile）：`make backend-install init-admin admin-install admin-build backend-dev`
 - 单元测试：`make test-unit`
+- 离线 UI 自测（Playwright）：`make selftest-ui`
 
 ## 环境变量
 

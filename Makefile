@@ -3,6 +3,7 @@
 .PHONY: help \
 	backend-install playwright-install init-admin backend-dev \
 	test-unit test-e2e \
+	selftest-ui selftest-heavy-load selftest-nurture \
 	admin-install admin-dev admin-build
 
 PY ?= python3
@@ -28,6 +29,11 @@ help:
 	@echo "测试:"
 	@echo "  test-unit           运行单元测试 (默认离线)"
 	@echo "  test-e2e            运行 e2e (仅本地)"
+	@echo ""
+	@echo "自测 (Playwright):"
+	@echo "  selftest-ui         Level A：离线 UI 自测（需 admin/dist）"
+	@echo "  selftest-heavy-load heavy load 自动换号续跑（需 admin/dist）"
+	@echo "  selftest-nurture    Level B：真实环境养号 e2e（需 ixBrowser/Sora）"
 
 backend-install:
 	$(PY) -m pip install -r requirements.txt
@@ -46,6 +52,16 @@ test-unit:
 
 test-e2e:
 	$(PY) -m pytest -m e2e
+
+selftest-ui:
+	SELFTEST_E2E=1 $(PY) -m pytest -m e2e -k admin_selftest
+
+selftest-heavy-load:
+	HEAVY_LOAD_E2E=1 $(PY) -m pytest -m e2e -k heavy_load
+
+selftest-nurture:
+	@echo "需要真实 ixBrowser/Sora 环境。示例：SORA_NURTURE_E2E=1 SORA_NURTURE_PROFILE_ID=39 SORA_NURTURE_GROUP_TITLE=Sora make selftest-nurture"
+	$(PY) -m pytest -m e2e -k sora_nurture
 
 admin-install:
 	cd admin && $(NPM) ci

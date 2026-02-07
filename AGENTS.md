@@ -32,6 +32,7 @@
 测试：
 - 单元测试（默认）：`make test-unit`
 - e2e（本地才跑）：`make test-e2e`
+- 离线 UI 自测（Playwright，推荐合并前跑）：`make selftest-ui`（见 `docs/selftest.md`）
 
 等价原生命令（当 Makefile 不可用时）：
 - `python -m pip install -r requirements.txt`
@@ -43,6 +44,7 @@
 ## 改动必须自证（Definition of Done）
 - 修改后端：至少跑 `make test-unit`，并确保与改动相关的用例覆盖到关键路径。
 - 修改前端：至少跑 `make admin-build`。
+- 合并前自测（推荐）：`make test-unit` + `make admin-build` + `make selftest-ui`（首次需 `make playwright-install`）。
 - 新增/修改环境变量：必须同步更新 `app/core/config.py` 与 `.env.example`，并在 `docs/dev.md` 补充说明（如需要）。
 - 不把构建产物或本地数据提交到 git（见下方“数据边界”）。
 
@@ -59,4 +61,3 @@
 验证命令（本地 / CI）：
 风险点/兼容要求：
 ```
-
