@@ -11,6 +11,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 from uuid import uuid4
 
 import httpx
@@ -4225,149 +4226,191 @@ class IXBrowserService:
         access_token: str,
         fetch_drafts: bool = False,
     ) -> Dict[str, Any]:
-        data = await page.evaluate(
-            """
-            async ({taskId, accessToken, fetchDrafts}) => {
-              const headers = {
-                "Authorization": `Bearer ${accessToken}`,
-                "Accept": "application/json"
-              };
-              try {
-                const didMatch = document.cookie.match(/(?:^|; )oai-did=([^;]+)/);
-                if (didMatch && didMatch[1]) headers["OAI-Device-Id"] = decodeURIComponent(didMatch[1]);
-              } catch (e) {}
-              const pickProgress = (obj) => {
-                if (!obj) return null;
-                return obj.progress
-                  ?? obj.progress_percent
-                  ?? obj.progress_percentage
-                  ?? obj.progress_pct
-                  ?? obj.percent
-                  ?? obj.pct
-                  ?? obj.progressPct
-                  ?? null;
-              };
-              const fail = (msg, progress = null) => ({ state: "failed", error: msg, task_url: null, progress, pending_missing: false });
-              let pendingProgress = null;
-              let pendingMissing = true;
-
-              try {
-                const pendingResp = await fetch("https://sora.chatgpt.com/backend/nf/pending/v2", {
-                  method: "GET",
-                  credentials: "include",
-                  headers
-                });
-                const pendingText = await pendingResp.text();
-                let pendingJson = null;
-                try { pendingJson = JSON.parse(pendingText); } catch (e) {}
-                if (pendingResp.status === 200 && Array.isArray(pendingJson)) {
-                  const foundPending = pendingJson.find((item) => item?.id === taskId);
-                  if (foundPending) {
-                    pendingMissing = false;
-                    const failureReason = foundPending?.failure_reason || foundPending?.failureReason || foundPending?.reason || null;
-                    const status = (foundPending?.status || foundPending?.state || '').toString().toLowerCase();
-                    pendingProgress = pickProgress(foundPending);
-                    if (failureReason || status === "failed") {
-                      return fail(String(failureReason || "任务失败"), pendingProgress);
-                    }
-                    if (typeof pendingProgress === "number" && pendingProgress >= 1) {
-                      pendingMissing = true;
-                    } else {
-                      return { state: "processing", error: null, task_url: null, progress: pendingProgress, pending_missing: false };
-                    }
-                  }
-                }
-              } catch (e) {}
-
-              const shouldFetchDrafts = fetchDrafts || pendingMissing;
-              if (!shouldFetchDrafts) {
-                return { state: "processing", error: null, task_url: null, progress: pendingProgress, pending_missing: false };
-              }
-
-              try {
-                const draftsResp = await fetch("https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=15", {
-                  method: "GET",
-                  credentials: "include",
-                  headers
-                });
-                const draftsText = await draftsResp.text();
-                let draftsJson = null;
-                try { draftsJson = JSON.parse(draftsText); } catch (e) {}
-                const items = draftsJson?.items;
-                if (!Array.isArray(items)) {
-                  return { state: "processing", error: null, task_url: null, pending_missing: pendingMissing };
-                }
-                const normalizeTask = (value) => {
-                  const v = (value || '').toString().toLowerCase();
-                  return v.startsWith('task_') ? v.slice(5) : v;
-                };
-                const taskNorm = normalizeTask(taskId);
-                const target = items.find((item) => {
-                  const itemTask = item?.task_id
-                    || item?.taskId
-                    || item?.task?.id
-                    || item?.task?.task_id
-                    || item?.id
-                    || item?.generation?.task_id
-                    || item?.generation?.taskId;
-                  const itemNorm = normalizeTask(itemTask);
-                  return itemNorm && itemNorm === taskNorm;
-                });
-                if (!target) {
-                  return { state: "processing", error: null, task_url: null, progress: pendingProgress, pending_missing: pendingMissing };
-                }
-
-                const reason = target.reason_str || target.markdown_reason_str || null;
-                const kind = target.kind || "";
-                const taskUrl = target.url || target.downloadable_url || null;
-                const progress = pickProgress(target);
-                let generationId = target?.generation_id
-                  || target?.generationId
-                  || target?.generation?.id
-                  || target?.generation?.generation_id
-                  || (typeof target?.id === "string" && target.id.startsWith("gen_") ? target.id : null)
-                  || null;
-                if (!generationId) {
-                  try {
-                    const blob = JSON.stringify(target);
-                    const m = blob && blob.match(/gen_[a-zA-Z0-9]{8,}/);
-                    if (m) generationId = m[0];
-                  } catch (e) {}
-                }
-                if (reason && String(reason).trim()) {
-                  return fail(String(reason), progress);
-                }
-                if (kind === "sora_content_violation") {
-                  return fail("内容审核未通过", progress);
-                }
-                if (generationId) {
-                  return { state: "completed", error: null, task_url: taskUrl, progress: 100, generation_id: generationId, pending_missing: true };
-                }
-                return { state: "processing", error: null, task_url: null, progress: progress ?? pendingProgress, generation_id: generationId, pending_missing: pendingMissing };
-              } catch (e) {
-                return fail(String(e));
-              }
-            }
-            """,
-            {
-                "taskId": task_id,
-                "accessToken": access_token,
-                "fetchDrafts": fetch_drafts,
-            }
-        )
-        if not isinstance(data, dict):
+        context = getattr(page, "context", None)
+        if context is None:
             return {"state": "processing", "error": None, "task_url": None, "progress": None, "pending_missing": False}
-        state = data.get("state")
-        if state not in {"processing", "completed", "failed"}:
-            state = "processing"
-        return {
-            "state": state,
-            "error": data.get("error"),
-            "task_url": data.get("task_url"),
-            "progress": data.get("progress"),
-            "generation_id": data.get("generation_id"),
-            "pending_missing": data.get("pending_missing"),
+
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
         }
+        try:
+            cookies = await context.cookies("https://sora.chatgpt.com")
+            for cookie in cookies:
+                if cookie.get("name") == "oai-did" and cookie.get("value"):
+                    headers["OAI-Device-Id"] = unquote(str(cookie["value"]))
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+        def pick_progress(obj: Any) -> Any:
+            if not isinstance(obj, dict):
+                return None
+            for key in (
+                "progress",
+                "progress_percent",
+                "progress_percentage",
+                "progress_pct",
+                "percent",
+                "pct",
+                "progressPct",
+            ):
+                if key in obj:
+                    return obj.get(key)
+            return None
+
+        def normalize_error(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            text = str(value)
+            return text.strip() or None
+
+        def fail(message: Any, progress: Any = None) -> Dict[str, Any]:
+            return {
+                "state": "failed",
+                "error": normalize_error(message) or "任务失败",
+                "task_url": None,
+                "progress": progress,
+                "generation_id": None,
+                "pending_missing": False,
+            }
+
+        pending_progress = None
+        pending_missing = True
+
+        try:
+            pending_resp = await context.request.get(
+                "https://sora.chatgpt.com/backend/nf/pending/v2",
+                headers=headers,
+                timeout=20_000,
+            )
+            pending_json = None
+            try:
+                pending_json = await pending_resp.json()
+            except Exception:  # noqa: BLE001
+                try:
+                    pending_text = await pending_resp.text()
+                    pending_json = json.loads(pending_text) if pending_text else None
+                except Exception:  # noqa: BLE001
+                    pending_json = None
+
+            if pending_resp.status == 200 and isinstance(pending_json, list):
+                found_pending = None
+                for item in pending_json:
+                    if isinstance(item, dict) and item.get("id") == task_id:
+                        found_pending = item
+                        break
+                if isinstance(found_pending, dict):
+                    pending_missing = False
+                    pending_progress = pick_progress(found_pending)
+                    failure_reason = (
+                        found_pending.get("failure_reason")
+                        or found_pending.get("failureReason")
+                        or found_pending.get("reason")
+                    )
+                    status = str(found_pending.get("status") or found_pending.get("state") or "").lower()
+                    if normalize_error(failure_reason) or status == "failed":
+                        return fail(failure_reason or "任务失败", pending_progress)
+
+                    if isinstance(pending_progress, (int, float)) and pending_progress >= 1:
+                        pending_missing = True
+                    else:
+                        return {
+                            "state": "processing",
+                            "error": None,
+                            "task_url": None,
+                            "progress": pending_progress,
+                            "generation_id": None,
+                            "pending_missing": False,
+                        }
+        except Exception:  # noqa: BLE001
+            # pending 接口不稳定时，继续走 drafts 兜底
+            pass
+
+        should_fetch_drafts = bool(fetch_drafts) or pending_missing
+        if not should_fetch_drafts:
+            return {
+                "state": "processing",
+                "error": None,
+                "task_url": None,
+                "progress": pending_progress,
+                "generation_id": None,
+                "pending_missing": False,
+            }
+
+        try:
+            drafts_resp = await context.request.get(
+                "https://sora.chatgpt.com/backend/project_y/profile/drafts?limit=15",
+                headers=headers,
+                timeout=20_000,
+            )
+            drafts_json = None
+            try:
+                drafts_json = await drafts_resp.json()
+            except Exception:  # noqa: BLE001
+                try:
+                    drafts_text = await drafts_resp.text()
+                    drafts_json = json.loads(drafts_text) if drafts_text else None
+                except Exception:  # noqa: BLE001
+                    drafts_json = None
+
+            items = drafts_json.get("items") if isinstance(drafts_json, dict) else None
+            if not isinstance(items, list) and isinstance(drafts_json, dict):
+                items = drafts_json.get("data")
+            if not isinstance(items, list):
+                return {
+                    "state": "processing",
+                    "error": None,
+                    "task_url": None,
+                    "progress": pending_progress,
+                    "generation_id": None,
+                    "pending_missing": pending_missing,
+                }
+
+            task_id_norm = self._normalize_task_id(task_id)
+            target = None
+            for item in items:
+                if isinstance(item, dict) and task_id_norm and self._match_task_id_in_item(item, task_id_norm):
+                    target = item
+                    break
+            if not isinstance(target, dict):
+                return {
+                    "state": "processing",
+                    "error": None,
+                    "task_url": None,
+                    "progress": pending_progress,
+                    "generation_id": None,
+                    "pending_missing": pending_missing,
+                }
+
+            reason = target.get("reason_str") or target.get("markdown_reason_str")
+            kind = str(target.get("kind") or "")
+            task_url = target.get("url") or target.get("downloadable_url")
+            progress = pick_progress(target)
+            generation_id = self._extract_generation_id(target)
+            if normalize_error(reason):
+                return fail(reason, progress)
+            if kind == "sora_content_violation":
+                return fail("内容审核未通过", progress)
+            if generation_id:
+                return {
+                    "state": "completed",
+                    "error": None,
+                    "task_url": task_url,
+                    "progress": 100,
+                    "generation_id": generation_id,
+                    "pending_missing": True,
+                }
+            return {
+                "state": "processing",
+                "error": None,
+                "task_url": None,
+                "progress": progress if progress is not None else pending_progress,
+                "generation_id": generation_id,
+                "pending_missing": pending_missing,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return fail(exc)
 
     def _normalize_progress(self, value: Any) -> Optional[int]:
         if value is None:
