@@ -168,10 +168,29 @@ class AccountDispatchService:
         safe_limit = min(max(int(limit), 1), 500)
         return weights[:safe_limit]
 
-    async def pick_best_account(self, group_title: str = "Sora") -> SoraAccountWeight:
+    async def pick_best_account(
+        self,
+        group_title: str = "Sora",
+        exclude_profile_ids: Optional[Iterable[int]] = None,
+    ) -> SoraAccountWeight:
         weights = await self.list_account_weights(group_title=group_title, limit=500)
         if not weights:
             raise AccountDispatchNoAvailableError("自动分配失败：未找到可用账号")
+
+        exclude: set[int] = set()
+        if exclude_profile_ids:
+            for item in exclude_profile_ids:
+                try:
+                    pid = int(item)
+                except Exception:
+                    continue
+                if pid > 0:
+                    exclude.add(pid)
+        if exclude:
+            weights = [item for item in weights if int(item.profile_id) not in exclude]
+            if not weights:
+                raise AccountDispatchNoAvailableError("自动分配失败：未找到可用账号")
+
         selectable = [item for item in weights if item.selectable]
         if selectable:
             return selectable[0]

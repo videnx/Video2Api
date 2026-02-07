@@ -482,7 +482,7 @@ const defaultSystemForm = {
         { phase: 'submit', message_contains: '未找到提示词输入框' }
       ],
       quality_error_rules: [
-        { phase: null, message_contains: 'heavy load', penalty: 8, cooldown_minutes: 15, block_during_cooldown: false },
+        { phase: null, message_contains: 'heavy load', penalty: 8, cooldown_minutes: 15, block_during_cooldown: true },
         {
           phase: null,
           message_contains: 'execution context was destroyed',

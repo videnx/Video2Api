@@ -762,15 +762,81 @@ class IXBrowserService:
         row = sqlite_db.get_sora_job(job_id)
         if not row:
             raise IXBrowserNotFoundError(f"未找到任务：{job_id}")
-        status = str(row.get("status") or "")
+        status = str(row.get("status") or "").strip().lower()
         if status == "running":
             raise IXBrowserServiceError("任务正在执行中")
         if status == "completed":
             raise IXBrowserServiceError("任务已完成，无需重试")
         if status == "canceled":
             raise IXBrowserServiceError("任务已取消，无法重试")
+        if status != "failed":
+            raise IXBrowserServiceError("任务未失败，无法重试")
 
-        phase = str(row.get("phase") or "submit")
+        phase = str(row.get("phase") or "submit").strip().lower()
+        error = str(row.get("error") or "").strip()
+
+        # Heavy load 时不要在同一账号上重试，而是换号重新创建同内容任务。
+        if phase == "submit" and self._is_sora_overload_error(error):
+            root_job_id = int(row.get("retry_root_job_id") or job_id)
+            max_idx = sqlite_db.get_sora_job_max_retry_index(root_job_id)
+            if int(max_idx) >= 3:
+                raise IXBrowserServiceError("换号重试已达上限（3次）")
+
+            group_title = str(row.get("group_title") or "Sora").strip() or "Sora"
+            old_profile_id = int(row.get("profile_id") or 0)
+            try:
+                weight = await account_dispatch_service.pick_best_account(
+                    group_title=group_title,
+                    exclude_profile_ids=[old_profile_id] if old_profile_id > 0 else None,
+                )
+            except AccountDispatchNoAvailableError as exc:
+                raise IXBrowserServiceError(str(exc)) from exc
+
+            selected_profile_id = int(weight.profile_id)
+            target_window = await self._get_window_from_group(selected_profile_id, group_title)
+            if not target_window:
+                raise IXBrowserNotFoundError(f"自动分配失败，窗口 {selected_profile_id} 不在 {group_title} 分组中")
+
+            dispatch_reason_base = " | ".join(weight.reasons or []) or "自动分配"
+            dispatch_reason = (
+                f"{dispatch_reason_base} | heavy load 换号重试（from job #{job_id} profile={old_profile_id}）"
+            )
+
+            new_job_id = sqlite_db.create_sora_job(
+                {
+                    "profile_id": selected_profile_id,
+                    "window_name": target_window.name,
+                    "group_title": group_title,
+                    "prompt": str(row.get("prompt") or ""),
+                    "duration": str(row.get("duration") or "10s"),
+                    "aspect_ratio": str(row.get("aspect_ratio") or "landscape"),
+                    "status": "queued",
+                    "phase": "queue",
+                    "progress_pct": 0,
+                    "dispatch_mode": "weighted_auto",
+                    "dispatch_score": float(weight.score_total),
+                    "dispatch_quantity_score": float(weight.score_quantity),
+                    "dispatch_quality_score": float(weight.score_quality),
+                    "dispatch_reason": dispatch_reason,
+                    "retry_of_job_id": int(job_id),
+                    "retry_root_job_id": int(root_job_id),
+                    "retry_index": int(max_idx) + 1,
+                    "operator_user_id": row.get("operator_user_id"),
+                    "operator_username": row.get("operator_username"),
+                }
+            )
+
+            sqlite_db.create_sora_job_event(
+                job_id,
+                phase,
+                "retry_new_job",
+                f"heavy load 换号重试 -> Job #{new_job_id} profile={selected_profile_id}",
+            )
+            sqlite_db.create_sora_job_event(new_job_id, "dispatch", "select", dispatch_reason)
+            sqlite_db.create_sora_job_event(new_job_id, "queue", "queue", "进入队列")
+            asyncio.create_task(self._run_sora_job(new_job_id))
+            return self.get_sora_job(new_job_id)
+
         patch: Dict[str, Any] = {
             "status": "queued",
             "error": None,
@@ -1197,6 +1263,9 @@ class IXBrowserService:
                         break
 
                     last_submit_error = submit_error or "提交生成失败"
+                    if submit_error and self._is_sora_overload_error(submit_error):
+                        # 不要在同一账号内重复提交，交给“换号重试”逻辑处理
+                        break
                     if attempt < 2:
                         await page.wait_for_timeout(1500)
 
@@ -4650,6 +4719,13 @@ class IXBrowserService:
     def _is_execution_context_destroyed(self, exc: Exception) -> bool:
         message = str(exc).lower()
         return "execution context was destroyed" in message
+
+    def _is_sora_overload_error(self, text: str) -> bool:
+        message = str(text or "").strip()
+        if not message:
+            return False
+        lower = message.lower()
+        return "heavy load" in lower or "under heavy load" in lower or "heavy_load" in lower
 
     def get_latest_sora_scan(
         self,

@@ -188,14 +188,17 @@ async def retry_sora_job(
 ):
     try:
         result = await ixbrowser_service.retry_sora_job(job_id)
+        result_job_id = int(getattr(result, "job_id", 0) or 0)
+        is_new_job = bool(result_job_id and result_job_id != int(job_id))
         _log_audit(
             request=request,
             current_user=current_user,
             action="sora.job.retry",
             status="success",
-            message="重试任务",
+            message="重试任务（heavy load 换号新建）" if is_new_job else "重试任务",
             resource_type="job",
-            resource_id=str(job_id),
+            resource_id=str(result_job_id or job_id),
+            extra={"old_job_id": int(job_id)} if is_new_job else None,
         )
         return result
     except IXBrowserNotFoundError as exc:

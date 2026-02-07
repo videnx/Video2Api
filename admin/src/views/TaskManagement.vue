@@ -674,8 +674,13 @@ const retryJob = async (row) => {
   }
   submitting.value = true
   try {
-    await retrySoraJob(row.job_id)
-    ElMessage.success(`Job #${row.job_id} 已重新进入队列`)
+    const result = await retrySoraJob(row.job_id)
+    const newJobId = result?.job_id
+    if (newJobId && newJobId !== row.job_id) {
+      ElMessage.success(`已换号创建新任务 Job #${newJobId}（原 Job #${row.job_id} 保留失败记录）`)
+    } else {
+      ElMessage.success(`Job #${row.job_id} 已重新进入队列`)
+    }
     await loadJobs()
   } catch (error) {
     ElMessage.error(error?.response?.data?.detail || '重试失败')

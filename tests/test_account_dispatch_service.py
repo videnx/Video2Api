@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.models.ixbrowser import IXBrowserWindow
+from app.models.ixbrowser import SoraAccountWeight
 from app.models.settings import AccountDispatchSettings
 from app.services.account_dispatch_service import AccountDispatchService
 
@@ -76,3 +77,21 @@ async def test_account_weights_ignore_rules_do_not_penalize(monkeypatch):
     assert by_profile[2].ignored_error_count == 0
     assert by_profile[2].fail_count_non_ignored == 1
     assert by_profile[2].score_quality == 0.0
+
+
+@pytest.mark.asyncio
+async def test_pick_best_account_excludes_profile_ids(monkeypatch):
+    service = AccountDispatchService()
+
+    async def _fake_list_account_weights(group_title="Sora", limit=500):
+        assert group_title == "Sora"
+        assert limit == 500
+        return [
+            SoraAccountWeight(profile_id=1, selectable=True, score_total=99),
+            SoraAccountWeight(profile_id=2, selectable=True, score_total=88),
+        ]
+
+    monkeypatch.setattr(service, "list_account_weights", _fake_list_account_weights)
+
+    weight = await service.pick_best_account(group_title="Sora", exclude_profile_ids=[1])
+    assert weight.profile_id == 2

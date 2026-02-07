@@ -254,6 +254,9 @@ class SQLiteDB:
                 dispatch_quantity_score REAL,
                 dispatch_quality_score REAL,
                 dispatch_reason TEXT,
+                retry_of_job_id INTEGER,
+                retry_root_job_id INTEGER,
+                retry_index INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP,
@@ -315,6 +318,18 @@ class SQLiteDB:
         if "dispatch_reason" not in columns:
             cursor.execute(
                 "ALTER TABLE sora_jobs ADD COLUMN dispatch_reason TEXT"
+            )
+        if "retry_of_job_id" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN retry_of_job_id INTEGER"
+            )
+        if "retry_root_job_id" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN retry_root_job_id INTEGER"
+            )
+        if "retry_index" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN retry_index INTEGER NOT NULL DEFAULT 0"
             )
 
         cursor.execute(
@@ -914,9 +929,10 @@ class SQLiteDB:
                 profile_id, window_name, group_title, prompt, duration, aspect_ratio,
                 status, phase, progress_pct, task_id, generation_id, publish_url,
                 dispatch_mode, dispatch_score, dispatch_quantity_score, dispatch_quality_score, dispatch_reason,
+                retry_of_job_id, retry_root_job_id, retry_index,
                 error,
                 started_at, finished_at, operator_user_id, operator_username, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 int(data.get("profile_id") or 0),
@@ -936,6 +952,9 @@ class SQLiteDB:
                 data.get("dispatch_quantity_score"),
                 data.get("dispatch_quality_score"),
                 data.get("dispatch_reason"),
+                data.get("retry_of_job_id"),
+                data.get("retry_root_job_id"),
+                int(data.get("retry_index") or 0),
                 data.get("error"),
                 data.get("started_at"),
                 data.get("finished_at"),
@@ -972,6 +991,9 @@ class SQLiteDB:
             "dispatch_quantity_score",
             "dispatch_quality_score",
             "dispatch_reason",
+            "retry_of_job_id",
+            "retry_root_job_id",
+            "retry_index",
             "watermark_status",
             "watermark_url",
             "watermark_error",
@@ -1015,6 +1037,28 @@ class SQLiteDB:
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
+
+    def get_sora_job_max_retry_index(self, root_job_id: int) -> int:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT MAX(COALESCE(retry_index, 0)) AS max_idx
+            FROM sora_jobs
+            WHERE id = ?
+               OR retry_root_job_id = ?
+            ''',
+            (int(root_job_id), int(root_job_id)),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return 0
+        value = row["max_idx"]
+        try:
+            return int(value) if value is not None else 0
+        except Exception:
+            return 0
 
     def list_sora_jobs(
         self,

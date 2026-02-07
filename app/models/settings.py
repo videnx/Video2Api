@@ -96,7 +96,7 @@ def _default_quality_error_rules() -> List[AccountDispatchErrorRule]:
             message_contains="heavy load",
             penalty=8,
             cooldown_minutes=15,
-            block_during_cooldown=False,
+            block_during_cooldown=True,
         ),
         AccountDispatchErrorRule(
             message_contains="execution context was destroyed",
