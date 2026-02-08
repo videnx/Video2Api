@@ -1028,3 +1028,56 @@ async def test_run_sora_job_submit_overload_auto_spawns_new_job(monkeypatch):
     assert scheduled == [("run", 11)]
     assert any(item[0] == old_job_id and item[2] == "auto_retry_new_job" for item in job_events)
     assert any(item[0] == 11 and item[2] == "select" for item in job_events)
+
+
+@pytest.mark.asyncio
+async def test_publish_sora_post_with_backoff_retries_invalid_request():
+    service = IXBrowserService()
+
+    class _DummyContext:
+        pass
+
+    class _DummyPage:
+        def __init__(self):
+            self.context = _DummyContext()
+            self.url = "https://sora.chatgpt.com/d/gen_test"
+            self.waits = []
+            self.reload_calls = 0
+
+        async def wait_for_timeout(self, ms):
+            self.waits.append(int(ms))
+
+        async def reload(self, **_kwargs):
+            self.reload_calls += 1
+
+    calls = {"count": 0}
+
+    async def _fake_get_device_id(_context):
+        return "did"
+
+    async def _fake_publish_sora_post_from_page(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] <= 2:
+            return {
+                "publish_url": None,
+                "error": "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"invalid_request\"}}",
+            }
+        return {"publish_url": "https://sora.chatgpt.com/p/s_12345678", "error": None}
+
+    service._get_device_id_from_context = _fake_get_device_id
+    service._publish_sora_post_from_page = _fake_publish_sora_post_from_page
+
+    page = _DummyPage()
+    result = await service._publish_sora_post_with_backoff(
+        page,
+        task_id="task_x",
+        prompt="prompt_x",
+        generation_id="gen_x",
+        max_attempts=5,
+    )
+
+    assert calls["count"] == 3
+    assert page.reload_calls == 1
+    assert 2000 in page.waits
+    assert 4000 in page.waits
+    assert result["publish_url"] == "https://sora.chatgpt.com/p/s_12345678"

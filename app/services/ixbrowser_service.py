@@ -2373,36 +2373,14 @@ class IXBrowserService:
                     page.url,
                 )
                 await self._clear_caption_input(page)
-                device_id = await self._get_device_id_from_context(context)
-                api_publish = None
-                for attempt in range(2):
-                    try:
-                        api_publish = await self._publish_sora_post_from_page(
-                            page=page,
-                            task_id=task_id,
-                            prompt=prompt,
-                            device_id=device_id,
-                            created_after=created_after,
-                            generation_id=draft_generation,
-                        )
-                        break
-                    except Exception as publish_exc:  # noqa: BLE001
-                        if (
-                            attempt == 0
-                            and "Execution context was destroyed" in str(publish_exc)
-                            and draft_generation
-                        ):
-                            try:
-                                await page.goto(
-                                    f"https://sora.chatgpt.com/d/{draft_generation}",
-                                    wait_until="domcontentloaded",
-                                    timeout=40_000,
-                                )
-                                await page.wait_for_timeout(1200)
-                            except Exception:  # noqa: BLE001
-                                pass
-                            continue
-                        raise
+                api_publish = await self._publish_sora_post_with_backoff(
+                    page,
+                    task_id=task_id,
+                    prompt=prompt,
+                    created_after=created_after,
+                    generation_id=draft_generation,
+                    max_attempts=5,
+                )
                 if api_publish and api_publish.get("publish_url"):
                     return api_publish["publish_url"]
                 if api_publish and api_publish.get("error"):
@@ -2545,36 +2523,14 @@ class IXBrowserService:
             page.url,
         )
         await self._clear_caption_input(page)
-        device_id = await self._get_device_id_from_context(page.context)
-        api_publish = None
-        for attempt in range(2):
-            try:
-                api_publish = await self._publish_sora_post_from_page(
-                    page=page,
-                    task_id=task_id,
-                    prompt=prompt,
-                    device_id=device_id,
-                    created_after=created_after,
-                    generation_id=draft_generation,
-                )
-                break
-            except Exception as publish_exc:  # noqa: BLE001
-                if (
-                    attempt == 0
-                    and "Execution context was destroyed" in str(publish_exc)
-                    and draft_generation
-                ):
-                    try:
-                        await page.goto(
-                            f"https://sora.chatgpt.com/d/{draft_generation}",
-                            wait_until="domcontentloaded",
-                            timeout=40_000,
-                        )
-                        await page.wait_for_timeout(1200)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    continue
-                raise
+        api_publish = await self._publish_sora_post_with_backoff(
+            page,
+            task_id=task_id,
+            prompt=prompt,
+            created_after=created_after,
+            generation_id=draft_generation,
+            max_attempts=5,
+        )
         if api_publish.get("publish_url"):
             return api_publish["publish_url"]
         if api_publish.get("error"):
@@ -4347,6 +4303,113 @@ class IXBrowserService:
             return {"publish_url": None, "error": f"发布未返回链接: {snippet}"}
         return {"publish_url": None, "error": data.get("error") or "发布未返回链接"}
 
+    async def _publish_sora_post_with_backoff(
+        self,
+        page,
+        *,
+        task_id: Optional[str],
+        prompt: str,
+        created_after: Optional[str] = None,
+        generation_id: Optional[str] = None,
+        max_attempts: int = 5,
+    ) -> Dict[str, Optional[str]]:
+        """发布接口退避重试。
+
+        genid 刚出现时，发布接口可能短暂返回 invalid_request；这里做有限重试
+        以减少误失败。仅对 invalid_request 做重试，避免掩盖真实异常。
+        """
+        delays_ms = [0, 2000, 4000, 8000, 12000]
+        try:
+            max_attempts_int = int(max_attempts)
+        except (TypeError, ValueError):
+            max_attempts_int = 5
+        if max_attempts_int < 1:
+            max_attempts_int = 1
+        attempts = min(max_attempts_int, len(delays_ms))
+
+        last_result: Dict[str, Optional[str]] = {"publish_url": None, "error": "发布未返回链接"}
+        for attempt_idx in range(attempts):
+            attempt_no = attempt_idx + 1
+
+            # 第 3 次尝试前刷新页面，尽量让页面脚本/token 状态收敛。
+            if attempt_no == 3:
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=40_000)
+                    await page.wait_for_timeout(1200)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            try:
+                context = page.context
+            except Exception:  # noqa: BLE001
+                context = None
+            if callable(context):
+                try:
+                    context = context()
+                except Exception:  # noqa: BLE001
+                    context = None
+
+            device_id = await self._get_device_id_from_context(context)
+            try:
+                data = await self._publish_sora_post_from_page(
+                    page=page,
+                    task_id=task_id,
+                    prompt=prompt,
+                    device_id=device_id,
+                    created_after=created_after,
+                    generation_id=generation_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if attempt_idx < attempts - 1 and self._is_execution_context_destroyed(exc) and generation_id:
+                    try:
+                        await page.goto(
+                            f"https://sora.chatgpt.com/d/{generation_id}",
+                            wait_until="domcontentloaded",
+                            timeout=40_000,
+                        )
+                        await page.wait_for_timeout(1200)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+                raise
+
+            if not isinstance(data, dict):
+                return {"publish_url": None, "error": "发布返回格式异常"}
+
+            last_result = {
+                "publish_url": data.get("publish_url"),
+                "error": data.get("error"),
+            }
+            if last_result.get("publish_url"):
+                return last_result
+
+            error = str(last_result.get("error") or "").strip()
+            if not error:
+                return last_result
+            lower = error.lower()
+            if "duplicate" in lower:
+                return last_result
+
+            if self._is_sora_publish_not_ready_error(error) and attempt_idx < attempts - 1:
+                next_delay_ms = delays_ms[attempt_idx + 1]
+                try:
+                    url = page.url
+                except Exception:  # noqa: BLE001
+                    url = ""
+                logger.info(
+                    "发布接口未就绪，准备重试: attempt=%s next_delay=%.1fs url=%s",
+                    attempt_no,
+                    next_delay_ms / 1000,
+                    url,
+                )
+                if next_delay_ms:
+                    await page.wait_for_timeout(next_delay_ms)
+                continue
+
+            return last_result
+
+        return last_result
+
     async def _poll_sora_task_from_page(
         self,
         page,
@@ -4903,6 +4966,19 @@ class IXBrowserService:
             return False
         lower = message.lower()
         return "heavy load" in lower or "under heavy load" in lower or "heavy_load" in lower
+
+    def _is_sora_publish_not_ready_error(self, text: str) -> bool:
+        message = str(text or "").strip()
+        if not message:
+            return False
+        lower = message.lower()
+        if "invalid_request_error" in lower:
+            return True
+        if "\"code\": \"invalid_request\"" in lower:
+            return True
+        if "\"code\":\"invalid_request\"" in lower:
+            return True
+        return False
 
     def get_latest_sora_scan(
         self,
