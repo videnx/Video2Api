@@ -22,11 +22,22 @@ class AccountRecoveryScheduler:
         self._settings = AccountDispatchSettings()
         self._owner = f"account-recovery-{uuid4().hex[:8]}"
         self._next_run_at = 0.0
+        self._pause_reason: Optional[str] = None
 
     def apply_settings(self, settings: AccountDispatchSettings) -> None:
         self._settings = settings.model_copy(deep=True)
         interval = max(1, int(self._settings.auto_scan_interval_minutes or 10))
-        self._next_run_at = max(self._next_run_at, time.time() + interval * 60)
+        now = time.time()
+        if not self._settings.enabled:
+            self._next_run_at = 0.0
+            self._set_paused("disabled")
+            return
+        if not self._settings.auto_scan_enabled:
+            self._next_run_at = 0.0
+            self._set_paused("auto_scan_disabled")
+            return
+        self._pause_reason = None
+        self._next_run_at = now + interval * 60
 
     async def start(self) -> None:
         self._stop_event.clear()
@@ -57,8 +68,13 @@ class AccountRecoveryScheduler:
 
     async def _tick(self) -> None:
         cfg = self._settings
-        if not cfg.enabled or not cfg.auto_scan_enabled:
+        if not cfg.enabled:
+            self._set_paused("disabled")
             return
+        if not cfg.auto_scan_enabled:
+            self._set_paused("auto_scan_disabled")
+            return
+        self._pause_reason = None
         now = time.time()
         if now < self._next_run_at:
             return
@@ -100,6 +116,28 @@ class AccountRecoveryScheduler:
                 metadata={"group_title": group_title, "interval_minutes": interval_minutes, "error": str(exc)},
             )
 
+    def _set_paused(self, reason: str) -> None:
+        normalized = str(reason or "").strip() or "unknown"
+        if self._pause_reason == normalized:
+            return
+        self._pause_reason = normalized
+        message = "账号恢复调度已暂停"
+        if normalized == "disabled":
+            message = "账号恢复调度已暂停：account_dispatch.enabled=false"
+        elif normalized == "auto_scan_disabled":
+            message = "账号恢复调度已暂停：auto_scan_enabled=false"
+        try:
+            sqlite_db.create_event_log(
+                source="system",
+                action="scheduler.account_recovery.paused",
+                event="paused",
+                status="success",
+                level="INFO",
+                message=message,
+                metadata={"reason": normalized, "owner": self._owner},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("记录账号恢复调度暂停日志失败")
+
 
 account_recovery_scheduler = AccountRecoveryScheduler()
-

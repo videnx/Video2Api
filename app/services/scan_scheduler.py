@@ -83,6 +83,15 @@ class ScanScheduler:
 
         lock_key = f"scheduler.scan.{slot_key}"
         if not sqlite_db.try_acquire_scheduler_lock(lock_key=lock_key, owner=self._owner, ttl_seconds=120):
+            sqlite_db.create_event_log(
+                source="system",
+                action="scheduler.scan.lock_conflict",
+                event="skip",
+                status="success",
+                level="INFO",
+                message=f"定时扫描跳过：时间片已被占用 slot={slot_key}",
+                metadata={"slot_key": slot_key, "owner": self._owner, "lock_key": lock_key},
+            )
             return
 
         self._fired_slot_keys.add(slot_key)
@@ -124,4 +133,3 @@ class ScanScheduler:
 
 
 scan_scheduler = ScanScheduler()
-
