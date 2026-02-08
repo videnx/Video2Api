@@ -1760,25 +1760,100 @@ class SQLiteDB:
 
         retention_days = int(getattr(settings, "event_log_retention_days", 30) or 0)
         cleanup_interval = int(getattr(settings, "event_log_cleanup_interval_sec", 3600) or 3600)
-        if retention_days <= 0:
+        max_mb = int(getattr(settings, "event_log_max_mb", 100) or 0)
+        max_bytes = max(0, int(max_mb) * 1024 * 1024)
+        if retention_days <= 0 and max_bytes <= 0:
             return
 
         now_ts = time.time()
         if (now_ts - self._last_event_cleanup_at) < cleanup_interval:
             return
         self._last_event_cleanup_at = now_ts
-        self.cleanup_event_logs(retention_days)
+        self.cleanup_event_logs(retention_days=retention_days, max_bytes=max_bytes)
 
-    def cleanup_event_logs(self, retention_days: int) -> int:
-        if retention_days <= 0:
+    def _estimate_event_logs_size_bytes(self, cursor_obj: sqlite3.Cursor) -> int:
+        cursor_obj.execute(
+            '''
+            SELECT COALESCE(SUM(
+                LENGTH(COALESCE(created_at, '')) +
+                LENGTH(COALESCE(source, '')) +
+                LENGTH(COALESCE(action, '')) +
+                LENGTH(COALESCE(event, '')) +
+                LENGTH(COALESCE(phase, '')) +
+                LENGTH(COALESCE(status, '')) +
+                LENGTH(COALESCE(level, '')) +
+                LENGTH(COALESCE(message, '')) +
+                LENGTH(COALESCE(trace_id, '')) +
+                LENGTH(COALESCE(request_id, '')) +
+                LENGTH(COALESCE(method, '')) +
+                LENGTH(COALESCE(path, '')) +
+                LENGTH(COALESCE(query_text, '')) +
+                LENGTH(COALESCE(CAST(status_code AS TEXT), '')) +
+                LENGTH(COALESCE(CAST(duration_ms AS TEXT), '')) +
+                LENGTH(COALESCE(CAST(is_slow AS TEXT), '')) +
+                LENGTH(COALESCE(CAST(operator_user_id AS TEXT), '')) +
+                LENGTH(COALESCE(operator_username, '')) +
+                LENGTH(COALESCE(ip, '')) +
+                LENGTH(COALESCE(user_agent, '')) +
+                LENGTH(COALESCE(resource_type, '')) +
+                LENGTH(COALESCE(resource_id, '')) +
+                LENGTH(COALESCE(error_type, '')) +
+                LENGTH(COALESCE(CAST(error_code AS TEXT), '')) +
+                LENGTH(COALESCE(metadata_json, '')) +
+                64
+            ), 0) AS approx_size
+            FROM event_logs
+            '''
+        )
+        row = cursor_obj.fetchone()
+        return int(row["approx_size"] or 0) if row else 0
+
+    def _cleanup_event_logs_by_size(self, cursor_obj: sqlite3.Cursor, max_bytes: int) -> int:
+        if max_bytes <= 0:
             return 0
-        cutoff = datetime.now() - timedelta(days=int(retention_days))
-        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+        deleted = 0
+        estimated_size = self._estimate_event_logs_size_bytes(cursor_obj)
+        if estimated_size <= max_bytes:
+            return 0
+
+        # 按最老数据批量裁剪，避免在高频写入下逐行删除。
+        batch_size = 500
+        while estimated_size > max_bytes:
+            cursor_obj.execute(
+                '''
+                DELETE FROM event_logs
+                WHERE id IN (
+                    SELECT id FROM event_logs
+                    ORDER BY id ASC
+                    LIMIT ?
+                )
+                ''',
+                (batch_size,),
+            )
+            step_deleted = int(cursor_obj.rowcount or 0)
+            if step_deleted <= 0:
+                break
+            deleted += step_deleted
+            estimated_size = self._estimate_event_logs_size_bytes(cursor_obj)
+        return deleted
+
+    def cleanup_event_logs(self, retention_days: int, max_bytes: int = 0) -> int:
+        if retention_days <= 0 and max_bytes <= 0:
+            return 0
+
         conn = self._get_conn()
         cursor_obj = conn.cursor()
-        cursor_obj.execute('DELETE FROM event_logs WHERE created_at < ?', (cutoff_str,))
-        deleted = int(cursor_obj.rowcount or 0)
-        conn.commit()
+        deleted = 0
+        if retention_days > 0:
+            cutoff = datetime.now() - timedelta(days=int(retention_days))
+            cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+            cursor_obj.execute('DELETE FROM event_logs WHERE created_at < ?', (cutoff_str,))
+            deleted += int(cursor_obj.rowcount or 0)
+
+        deleted += self._cleanup_event_logs_by_size(cursor_obj, int(max_bytes or 0))
+        if deleted > 0:
+            conn.commit()
         conn.close()
         return deleted
 

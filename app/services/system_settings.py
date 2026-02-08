@@ -110,6 +110,7 @@ def default_system_settings(mask_sensitive: bool = False) -> SystemSettings:
             "log_backup_count": cfg.log_backup_count,
             "event_log_retention_days": cfg.event_log_retention_days,
             "event_log_cleanup_interval_sec": cfg.event_log_cleanup_interval_sec,
+            "event_log_max_mb": cfg.event_log_max_mb,
             "api_log_capture_mode": cfg.api_log_capture_mode,
             "api_slow_threshold_ms": cfg.api_slow_threshold_ms,
             "log_mask_mode": cfg.log_mask_mode,
@@ -208,6 +209,7 @@ def apply_runtime_settings(settings_data: Optional[SystemSettings] = None) -> No
     cfg.access_token_expire_minutes = data.auth.access_token_expire_minutes
     cfg.event_log_retention_days = data.logging.event_log_retention_days
     cfg.event_log_cleanup_interval_sec = data.logging.event_log_cleanup_interval_sec
+    cfg.event_log_max_mb = data.logging.event_log_max_mb
     cfg.api_log_capture_mode = data.logging.api_log_capture_mode
     cfg.api_slow_threshold_ms = data.logging.api_slow_threshold_ms
     cfg.log_mask_mode = data.logging.log_mask_mode

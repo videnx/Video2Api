@@ -87,9 +87,11 @@ python -m playwright install
   - 慢请求阈值默认 `2000ms`
   - 脱敏模式默认 `basic`
   - 事件日志保留默认 `30` 天
+  - 事件日志大小上限默认 `100MB`（超限后按时间从旧到新自动裁剪）
 - 相关环境变量（见 `.env.example`）：
   - `EVENT_LOG_RETENTION_DAYS`
   - `EVENT_LOG_CLEANUP_INTERVAL_SEC`
+  - `EVENT_LOG_MAX_MB`
   - `API_LOG_CAPTURE_MODE`
   - `API_SLOW_THRESHOLD_MS`
   - `LOG_MASK_MODE`

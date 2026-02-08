@@ -337,6 +337,9 @@
                 <el-form-item label="事件日志清理间隔（秒）">
                   <el-input-number v-model="systemForm.logging.event_log_cleanup_interval_sec" :min="60" :max="86400" />
                 </el-form-item>
+                <el-form-item label="事件日志最大大小（MB）">
+                  <el-input-number v-model="systemForm.logging.event_log_max_mb" :min="1" :max="10240" />
+                </el-form-item>
                 <el-form-item label="API 日志采集模式">
                   <el-select v-model="systemForm.logging.api_log_capture_mode" style="width: 100%">
                     <el-option label="全部采集 (all)" value="all" />
@@ -542,6 +545,7 @@ const defaultSystemForm = {
     log_backup_count: 5,
     event_log_retention_days: 30,
     event_log_cleanup_interval_sec: 3600,
+    event_log_max_mb: 100,
     api_log_capture_mode: 'all',
     api_slow_threshold_ms: 2000,
     log_mask_mode: 'basic',

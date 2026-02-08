@@ -147,6 +147,7 @@ class LoggingSettings(BaseModel):
 
     event_log_retention_days: int = Field(30, ge=0, le=3650)
     event_log_cleanup_interval_sec: int = Field(3600, ge=60, le=86_400)
+    event_log_max_mb: int = Field(100, ge=1, le=10_240)
     api_log_capture_mode: str = "all"
     api_slow_threshold_ms: int = Field(2000, ge=100, le=120_000)
     log_mask_mode: str = "basic"

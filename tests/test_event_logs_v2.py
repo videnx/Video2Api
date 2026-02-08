@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from app.core.config import settings
 from app.db.sqlite import sqlite_db
 
 pytestmark = pytest.mark.unit
@@ -137,3 +138,52 @@ def test_sora_job_event_compatibility_mapping(temp_db):
     log_rows = sqlite_db.list_sora_job_events_for_logs(keyword="boom", limit=20)
     assert log_rows
     assert any(int(item["job_id"]) == int(job_id) for item in log_rows)
+
+
+def test_event_logs_size_limit_cleanup(temp_db):
+    del temp_db
+    old_retention_days = settings.event_log_retention_days
+    old_cleanup_interval = settings.event_log_cleanup_interval_sec
+    old_max_mb = getattr(settings, "event_log_max_mb", 100)
+    try:
+        settings.event_log_retention_days = 3650
+        settings.event_log_cleanup_interval_sec = 3600
+        settings.event_log_max_mb = 1
+        sqlite_db._last_event_cleanup_at = 0.0
+
+        payload = "x" * 40_000
+        for idx in range(80):
+            sqlite_db.create_event_log(
+                source="system",
+                action="logger.info",
+                status="success",
+                level="INFO",
+                message=f"log-{idx}:{payload}",
+                metadata={"payload": payload, "index": idx},
+            )
+
+        conn = sqlite_db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS total_count FROM event_logs")
+        row = cursor.fetchone()
+        before_count = int(row["total_count"] or 0) if row else 0
+        conn.close()
+        assert before_count == 80
+
+        sqlite_db._last_event_cleanup_at = 0.0
+        sqlite_db._maybe_cleanup_event_logs()
+
+        conn = sqlite_db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS total_count FROM event_logs")
+        row = cursor.fetchone()
+        after_count = int(row["total_count"] or 0) if row else 0
+        estimated_size = sqlite_db._estimate_event_logs_size_bytes(cursor)
+        conn.close()
+
+        assert after_count < before_count
+        assert estimated_size <= settings.event_log_max_mb * 1024 * 1024
+    finally:
+        settings.event_log_retention_days = old_retention_days
+        settings.event_log_cleanup_interval_sec = old_cleanup_interval
+        settings.event_log_max_mb = old_max_mb
