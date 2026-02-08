@@ -28,9 +28,19 @@ class SQLiteDB:
     def _ensure_data_dir(self):
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
 
+    def _now_str(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     def _get_conn(self):
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            pass
         return conn
 
     def _init_db(self):
@@ -135,6 +145,17 @@ class SQLiteDB:
             CREATE TABLE IF NOT EXISTS scan_scheduler_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 payload_json TEXT NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            '''
+        )
+
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS scheduler_locks (
+                lock_key TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                locked_until TIMESTAMP NOT NULL,
                 updated_at TIMESTAMP NOT NULL
             )
             '''
@@ -302,6 +323,11 @@ class SQLiteDB:
                 retry_of_job_id INTEGER,
                 retry_root_job_id INTEGER,
                 retry_index INTEGER NOT NULL DEFAULT 0,
+                lease_owner TEXT,
+                lease_until TIMESTAMP,
+                heartbeat_at TIMESTAMP,
+                run_attempt INTEGER NOT NULL DEFAULT 0,
+                run_last_error TEXT,
                 error TEXT,
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP,
@@ -376,6 +402,27 @@ class SQLiteDB:
             cursor.execute(
                 "ALTER TABLE sora_jobs ADD COLUMN retry_index INTEGER NOT NULL DEFAULT 0"
             )
+        if "lease_owner" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN lease_owner TEXT"
+            )
+        if "lease_until" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN lease_until TIMESTAMP"
+            )
+        if "heartbeat_at" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN heartbeat_at TIMESTAMP"
+            )
+        if "run_attempt" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0"
+            )
+        if "run_last_error" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN run_last_error TEXT"
+            )
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_sora_jobs_status_lease ON sora_jobs(status, lease_until, id ASC)')
 
         cursor.execute(
             '''
@@ -414,6 +461,11 @@ class SQLiteDB:
                 like_total INTEGER NOT NULL DEFAULT 0,
                 follow_total INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
+                lease_owner TEXT,
+                lease_until TIMESTAMP,
+                heartbeat_at TIMESTAMP,
+                run_attempt INTEGER NOT NULL DEFAULT 0,
+                run_last_error TEXT,
                 operator_user_id INTEGER,
                 operator_username TEXT,
                 started_at TIMESTAMP,
@@ -425,6 +477,30 @@ class SQLiteDB:
         )
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_sora_nurture_batches_status ON sora_nurture_batches(status, id DESC)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_sora_nurture_batches_group ON sora_nurture_batches(group_title, id DESC)')
+
+        cursor.execute("PRAGMA table_info(sora_nurture_batches)")
+        batch_columns = {row["name"] for row in cursor.fetchall()}
+        if "lease_owner" not in batch_columns:
+            cursor.execute(
+                "ALTER TABLE sora_nurture_batches ADD COLUMN lease_owner TEXT"
+            )
+        if "lease_until" not in batch_columns:
+            cursor.execute(
+                "ALTER TABLE sora_nurture_batches ADD COLUMN lease_until TIMESTAMP"
+            )
+        if "heartbeat_at" not in batch_columns:
+            cursor.execute(
+                "ALTER TABLE sora_nurture_batches ADD COLUMN heartbeat_at TIMESTAMP"
+            )
+        if "run_attempt" not in batch_columns:
+            cursor.execute(
+                "ALTER TABLE sora_nurture_batches ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0"
+            )
+        if "run_last_error" not in batch_columns:
+            cursor.execute(
+                "ALTER TABLE sora_nurture_batches ADD COLUMN run_last_error TEXT"
+            )
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_sora_nurture_batches_status_lease ON sora_nurture_batches(status, lease_until, id ASC)')
 
         cursor.execute(
             '''
@@ -1060,6 +1136,11 @@ class SQLiteDB:
             "retry_of_job_id",
             "retry_root_job_id",
             "retry_index",
+            "lease_owner",
+            "lease_until",
+            "heartbeat_at",
+            "run_attempt",
+            "run_last_error",
             "watermark_status",
             "watermark_url",
             "watermark_error",
@@ -1275,6 +1356,310 @@ class SQLiteDB:
                 continue
             result[profile_id] = int(row["cnt"] or 0)
         return result
+
+    def try_acquire_scheduler_lock(self, lock_key: str, owner: str, ttl_seconds: int = 120) -> bool:
+        safe_key = str(lock_key or "").strip()
+        safe_owner = str(owner or "unknown").strip() or "unknown"
+        if not safe_key:
+            return False
+        now = self._now_str()
+        lock_until = (datetime.now() + timedelta(seconds=max(1, int(ttl_seconds)))).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                '''
+                SELECT lock_key
+                FROM scheduler_locks
+                WHERE lock_key = ?
+                  AND locked_until >= ?
+                ''',
+                (safe_key, now),
+            )
+            row = cursor.fetchone()
+            if row:
+                conn.rollback()
+                return False
+            cursor.execute(
+                '''
+                INSERT INTO scheduler_locks (lock_key, owner, locked_until, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(lock_key) DO UPDATE SET
+                    owner = excluded.owner,
+                    locked_until = excluded.locked_until,
+                    updated_at = excluded.updated_at
+                ''',
+                (safe_key, safe_owner, lock_until, now),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def claim_next_sora_job(self, owner: str, lease_seconds: int = 120) -> Optional[Dict[str, Any]]:
+        safe_owner = str(owner or "").strip() or "unknown"
+        now = self._now_str()
+        lease_until = (datetime.now() + timedelta(seconds=max(10, int(lease_seconds)))).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                '''
+                SELECT id
+                FROM sora_jobs
+                WHERE status = 'queued'
+                  AND (lease_until IS NULL OR lease_until < ?)
+                ORDER BY id ASC
+                LIMIT 1
+                ''',
+                (now,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            job_id = int(row["id"])
+            cursor.execute(
+                '''
+                UPDATE sora_jobs
+                SET lease_owner = ?,
+                    lease_until = ?,
+                    heartbeat_at = ?,
+                    run_attempt = COALESCE(run_attempt, 0) + 1,
+                    run_last_error = NULL
+                WHERE id = ?
+                  AND status = 'queued'
+                  AND (lease_until IS NULL OR lease_until < ?)
+                ''',
+                (safe_owner, lease_until, now, job_id, now),
+            )
+            if cursor.rowcount <= 0:
+                conn.rollback()
+                return None
+            cursor.execute("SELECT * FROM sora_jobs WHERE id = ?", (job_id,))
+            claimed = cursor.fetchone()
+            conn.commit()
+            return dict(claimed) if claimed else None
+        except Exception:
+            conn.rollback()
+            return None
+        finally:
+            conn.close()
+
+    def heartbeat_sora_job_lease(self, job_id: int, owner: str, lease_seconds: int = 120) -> bool:
+        now = self._now_str()
+        lease_until = (datetime.now() + timedelta(seconds=max(10, int(lease_seconds)))).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE sora_jobs
+            SET heartbeat_at = ?, lease_until = ?
+            WHERE id = ? AND lease_owner = ?
+            ''',
+            (now, lease_until, int(job_id), str(owner or "")),
+        )
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def clear_sora_job_lease(self, job_id: int, owner: str) -> bool:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE sora_jobs
+            SET lease_owner = NULL,
+                lease_until = NULL,
+                heartbeat_at = NULL
+            WHERE id = ? AND lease_owner = ?
+            ''',
+            (int(job_id), str(owner or "")),
+        )
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def requeue_stale_sora_jobs(self) -> int:
+        now = self._now_str()
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE sora_jobs
+            SET status = 'queued',
+                phase = CASE WHEN phase IS NULL OR TRIM(phase) = '' THEN 'queue' ELSE phase END,
+                lease_owner = NULL,
+                lease_until = NULL,
+                heartbeat_at = NULL,
+                run_last_error = COALESCE(run_last_error, 'worker lease expired')
+            WHERE status = 'running'
+              AND lease_until IS NOT NULL
+              AND lease_until < ?
+            ''',
+            (now,),
+        )
+        count = int(cursor.rowcount or 0)
+        conn.commit()
+        conn.close()
+        return count
+
+    def claim_next_sora_nurture_batch(self, owner: str, lease_seconds: int = 180) -> Optional[Dict[str, Any]]:
+        safe_owner = str(owner or "").strip() or "unknown"
+        now = self._now_str()
+        lease_until = (datetime.now() + timedelta(seconds=max(10, int(lease_seconds)))).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                '''
+                SELECT id
+                FROM sora_nurture_batches
+                WHERE status = 'queued'
+                  AND (lease_until IS NULL OR lease_until < ?)
+                ORDER BY id ASC
+                LIMIT 1
+                ''',
+                (now,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            batch_id = int(row["id"])
+            cursor.execute(
+                '''
+                UPDATE sora_nurture_batches
+                SET lease_owner = ?,
+                    lease_until = ?,
+                    heartbeat_at = ?,
+                    run_attempt = COALESCE(run_attempt, 0) + 1,
+                    run_last_error = NULL
+                WHERE id = ?
+                  AND status = 'queued'
+                  AND (lease_until IS NULL OR lease_until < ?)
+                ''',
+                (safe_owner, lease_until, now, batch_id, now),
+            )
+            if cursor.rowcount <= 0:
+                conn.rollback()
+                return None
+            cursor.execute("SELECT * FROM sora_nurture_batches WHERE id = ?", (batch_id,))
+            claimed = cursor.fetchone()
+            conn.commit()
+            if not claimed:
+                return None
+            data = dict(claimed)
+            raw = data.get("profile_ids_json")
+            try:
+                parsed = json.loads(raw) if raw else []
+                if not isinstance(parsed, list):
+                    parsed = []
+            except Exception:
+                parsed = []
+            data["profile_ids"] = parsed
+            return data
+        except Exception:
+            conn.rollback()
+            return None
+        finally:
+            conn.close()
+
+    def heartbeat_sora_nurture_batch_lease(self, batch_id: int, owner: str, lease_seconds: int = 180) -> bool:
+        now = self._now_str()
+        lease_until = (datetime.now() + timedelta(seconds=max(10, int(lease_seconds)))).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE sora_nurture_batches
+            SET heartbeat_at = ?, lease_until = ?
+            WHERE id = ? AND lease_owner = ?
+            ''',
+            (now, lease_until, int(batch_id), str(owner or "")),
+        )
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def clear_sora_nurture_batch_lease(self, batch_id: int, owner: str) -> bool:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE sora_nurture_batches
+            SET lease_owner = NULL,
+                lease_until = NULL,
+                heartbeat_at = NULL
+            WHERE id = ? AND lease_owner = ?
+            ''',
+            (int(batch_id), str(owner or "")),
+        )
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def requeue_stale_sora_nurture_batches(self) -> int:
+        now = self._now_str()
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            '''
+            SELECT id
+            FROM sora_nurture_batches
+            WHERE status = 'running'
+              AND lease_until IS NOT NULL
+              AND lease_until < ?
+            ''',
+            (now,),
+        )
+        rows = cursor.fetchall()
+        batch_ids = [int(item["id"]) for item in rows] if rows else []
+        if not batch_ids:
+            conn.rollback()
+            conn.close()
+            return 0
+
+        placeholders = ",".join(["?"] * len(batch_ids))
+        cursor.execute(
+            f'''
+            UPDATE sora_nurture_batches
+            SET status = 'queued',
+                lease_owner = NULL,
+                lease_until = NULL,
+                heartbeat_at = NULL,
+                run_last_error = COALESCE(run_last_error, 'worker lease expired')
+            WHERE id IN ({placeholders})
+            ''',
+            batch_ids,
+        )
+        # 回收中断中的子任务，避免批次重跑时卡在 running。
+        cursor.execute(
+            f'''
+            UPDATE sora_nurture_jobs
+            SET status = 'queued',
+                phase = 'queue',
+                error = COALESCE(error, 'worker lease expired')
+            WHERE batch_id IN ({placeholders})
+              AND status = 'running'
+            ''',
+            batch_ids,
+        )
+        count = len(batch_ids)
+        conn.commit()
+        conn.close()
+        return count
 
     def get_system_settings(self) -> Optional[Dict[str, Any]]:
         conn = self._get_conn()
@@ -1975,6 +2360,11 @@ class SQLiteDB:
             "like_total",
             "follow_total",
             "error",
+            "lease_owner",
+            "lease_until",
+            "heartbeat_at",
+            "run_attempt",
+            "run_last_error",
             "operator_user_id",
             "operator_username",
             "started_at",

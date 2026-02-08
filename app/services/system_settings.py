@@ -1,8 +1,8 @@
 """系统设置服务"""
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 from app.core import config as core_config
@@ -14,6 +14,8 @@ from app.models.settings import (
     SystemSettingsEnvelope,
 )
 from app.services.ixbrowser_service import ixbrowser_service
+
+logger = logging.getLogger(__name__)
 
 REQUIRES_RESTART_FIELDS = [
     "auth.secret_key",
@@ -45,6 +47,22 @@ def _normalize_secret(value: Optional[str]) -> Optional[str]:
     if isinstance(value, str) and not value.strip():
         return None
     return value
+
+
+def _log_scheduler_missing(name: str, exc: Exception) -> None:
+    logger.warning("调度器缺失或加载失败: %s | %s", name, exc)
+    try:
+        sqlite_db.create_event_log(
+            source="system",
+            action="scheduler.missing",
+            event="missing",
+            status="failed",
+            level="WARN",
+            message=f"{name} 未生效：{exc}",
+            metadata={"scheduler": name, "error": str(exc)},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _load_system_settings_row() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -198,6 +216,12 @@ def get_scan_scheduler_envelope() -> ScanSchedulerEnvelope:
 def update_scan_scheduler_settings(payload: ScanSchedulerSettings) -> ScanSchedulerEnvelope:
     payload_json = json.dumps(payload.model_dump(), ensure_ascii=False)
     sqlite_db.upsert_scan_scheduler_settings(payload_json)
+    try:
+        from app.services.scan_scheduler import scan_scheduler  # noqa: WPS433
+
+        scan_scheduler.apply_settings(payload)
+    except Exception as exc:  # noqa: BLE001
+        _log_scheduler_missing("scan_scheduler", exc)
     return get_scan_scheduler_envelope()
 
 
@@ -236,5 +260,5 @@ def apply_runtime_settings(settings_data: Optional[SystemSettings] = None) -> No
         from app.services.account_recovery_scheduler import account_recovery_scheduler  # noqa: WPS433
 
         account_recovery_scheduler.apply_settings(data.sora.account_dispatch)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _log_scheduler_missing("account_recovery_scheduler", exc)

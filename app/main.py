@@ -14,7 +14,10 @@ from app.core.config import settings
 from app.core.errors import install_exception_handlers
 from app.core.logger import setup_logging
 from app.db.sqlite import sqlite_db
-from app.services.system_settings import apply_runtime_settings
+from app.services.account_recovery_scheduler import account_recovery_scheduler
+from app.services.scan_scheduler import scan_scheduler
+from app.services.system_settings import apply_runtime_settings, load_scan_scheduler_settings, load_system_settings
+from app.services.worker_runner import worker_runner
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -34,6 +37,67 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup_background_services() -> None:
+    try:
+        apply_runtime_settings()
+        scan_scheduler.apply_settings(load_scan_scheduler_settings())
+        account_recovery_scheduler.apply_settings(load_system_settings(mask_sensitive=False).sora.account_dispatch)
+        await worker_runner.start()
+        await scan_scheduler.start()
+        await account_recovery_scheduler.start()
+        sqlite_db.create_event_log(
+            source="system",
+            action="app.startup.background_services",
+            event="startup",
+            status="success",
+            level="INFO",
+            message="后台 Worker 与调度器已启动",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("后台服务启动失败")
+        try:
+            sqlite_db.create_event_log(
+                source="system",
+                action="app.startup.background_services",
+                event="startup",
+                status="failed",
+                level="ERROR",
+                message=f"后台服务启动失败: {exc}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.on_event("shutdown")
+async def shutdown_background_services() -> None:
+    try:
+        await account_recovery_scheduler.stop()
+        await scan_scheduler.stop()
+        await worker_runner.stop()
+        sqlite_db.create_event_log(
+            source="system",
+            action="app.shutdown.background_services",
+            event="shutdown",
+            status="success",
+            level="INFO",
+            message="后台 Worker 与调度器已停止",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("后台服务停止失败")
+        try:
+            sqlite_db.create_event_log(
+                source="system",
+                action="app.shutdown.background_services",
+                event="shutdown",
+                status="failed",
+                level="WARN",
+                message=f"后台服务停止失败: {exc}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @app.middleware("http")

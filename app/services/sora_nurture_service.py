@@ -20,6 +20,7 @@ from app.services.ixbrowser_service import (
     IXBrowserServiceError,
     ixbrowser_service,
 )
+from app.services.task_runtime import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +194,11 @@ class SoraNurtureService:
             existing = self._tasks.get(batch_id)
             if existing and not existing.done():
                 return
-            task = asyncio.create_task(self._run_batch_impl(batch_id))
+            task = spawn(
+                self._run_batch_impl(batch_id),
+                task_name="nurture.batch.run",
+                metadata={"batch_id": batch_id},
+            )
             self._tasks[batch_id] = task
 
     async def _run_batch_impl(self, batch_id: int) -> None:

@@ -1,7 +1,5 @@
 from typing import List, Optional
 
-import asyncio
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.core.audit import log_audit
@@ -36,7 +34,6 @@ async def create_nurture_batch(
                 "follow_probability": payload.follow_probability,
             },
         )
-        asyncio.create_task(sora_nurture_service.run_batch(int(batch.get("batch_id") or 0)))
         return batch
     except Exception as exc:  # noqa: BLE001
         log_audit(

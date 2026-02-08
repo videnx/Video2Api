@@ -37,6 +37,7 @@ from app.models.ixbrowser import (
     SoraJobRequest,
 )
 from app.services.account_dispatch_service import AccountDispatchNoAvailableError, account_dispatch_service
+from app.services.task_runtime import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -621,7 +622,7 @@ class IXBrowserService:
         async def _runner():
             await self._run_sora_generate_job(job_id)
 
-        asyncio.create_task(_runner())
+        spawn(_runner(), task_name="compat.generate.run", metadata={"job_id": int(job_id)})
         job = self.get_sora_generate_job(job_id)
         return IXBrowserGenerateJobCreateResponse(job=job)
 
@@ -652,14 +653,16 @@ class IXBrowserService:
             }
         )
 
-        asyncio.create_task(
+        spawn(
             self._run_sora_publish_job(
                 job_id=job_id,
                 profile_id=int(row["profile_id"]),
                 task_id=row.get("task_id"),
                 task_url=row.get("task_url"),
                 prompt=str(row.get("prompt") or ""),
-            )
+            ),
+            task_name="compat.generate.publish",
+            metadata={"job_id": int(job_id)},
         )
 
         row = sqlite_db.get_ixbrowser_generate_job(job_id)
@@ -675,12 +678,14 @@ class IXBrowserService:
         if not task_id:
             raise IXBrowserServiceError("缺少任务标识，无法获取 genid")
 
-        asyncio.create_task(
+        spawn(
             self._run_sora_fetch_generation_id(
                 job_id=job_id,
                 profile_id=int(row["profile_id"]),
                 task_id=task_id,
-            )
+            ),
+            task_name="compat.generate.genid",
+            metadata={"job_id": int(job_id)},
         )
 
         row = sqlite_db.get_ixbrowser_generate_job(job_id)
@@ -777,7 +782,6 @@ class IXBrowserService:
         sqlite_db.create_sora_job_event(job_id, "dispatch", "select", dispatch_reason)
         sqlite_db.create_sora_job_event(job_id, "queue", "queue", "进入队列")
 
-        asyncio.create_task(self._run_sora_job(job_id))
         job = self.get_sora_job(job_id)
         return SoraJobCreateResponse(job=job)
 
@@ -918,7 +922,6 @@ class IXBrowserService:
         )
         sqlite_db.create_sora_job_event(new_job_id, "dispatch", "select", dispatch_reason)
         sqlite_db.create_sora_job_event(new_job_id, "queue", "queue", "进入队列")
-        asyncio.create_task(self._run_sora_job(new_job_id))
         return self.get_sora_job(new_job_id)
 
     async def retry_sora_job(self, job_id: int) -> SoraJob:
@@ -950,7 +953,6 @@ class IXBrowserService:
             patch["progress_pct"] = 0
         sqlite_db.update_sora_job(job_id, patch)
         sqlite_db.create_sora_job_event(job_id, phase, "retry", "手动重试")
-        asyncio.create_task(self._run_sora_job(job_id))
         return self.get_sora_job(job_id)
 
     async def retry_sora_watermark(self, job_id: int) -> SoraJob:
@@ -983,7 +985,11 @@ class IXBrowserService:
             },
         )
         sqlite_db.create_sora_job_event(job_id, "watermark", "retry", "手动重试")
-        asyncio.create_task(self._run_sora_watermark_retry(job_id=job_id, publish_url=publish_url))
+        spawn(
+            self._run_sora_watermark_retry(job_id=job_id, publish_url=publish_url),
+            task_name="sora.job.watermark.retry",
+            metadata={"job_id": int(job_id)},
+        )
         return self.get_sora_job(job_id)
 
     async def cancel_sora_job(self, job_id: int) -> SoraJob:
@@ -2316,7 +2322,7 @@ class IXBrowserService:
                 page = context.pages[0] if context.pages else await context.new_page()
 
                 await self._prepare_sora_page(page, profile_id)
-                publish_future = self._watch_publish_url(page)
+                publish_future = self._watch_publish_url(page, task_id=task_id)
                 draft_generation = None
                 if isinstance(generation_id, str) and generation_id.strip() and generation_id.strip().startswith("gen_"):
                     draft_generation = generation_id.strip()
@@ -2469,7 +2475,7 @@ class IXBrowserService:
             generation_id,
             page.url,
         )
-        publish_future = self._watch_publish_url(page)
+        publish_future = self._watch_publish_url(page, task_id=task_id)
         draft_generation = None
         if isinstance(generation_id, str) and generation_id.strip() and generation_id.strip().startswith("gen_"):
             draft_generation = generation_id.strip()
@@ -2585,7 +2591,7 @@ class IXBrowserService:
 
         return await self._wait_for_publish_url(publish_future, page, timeout_seconds=45)
 
-    def _watch_publish_url(self, page):
+    def _watch_publish_url(self, page, task_id: Optional[str] = None):
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
 
@@ -2608,7 +2614,14 @@ class IXBrowserService:
             if found and not future.done():
                 future.set_result(found)
 
-        page.on("response", lambda resp: asyncio.create_task(handle_response(resp)))
+        page.on(
+            "response",
+            lambda resp: spawn(
+                handle_response(resp),
+                task_name="sora.listen_drafts.response",
+                metadata={"task_id": str(task_id) if task_id else None},
+            ),
+        )
         return future
 
     async def _wait_for_publish_url(self, future, page, timeout_seconds: int = 20) -> Optional[str]:
@@ -3526,7 +3539,14 @@ class IXBrowserService:
                     url,
                 )
 
-        page.on("response", lambda resp: asyncio.create_task(handle_response(resp)))
+        page.on(
+            "response",
+            lambda resp: spawn(
+                handle_response(resp),
+                task_name="sora.listen_drafts_ctx.response",
+                metadata={"task_id": str(task_id) if task_id else None},
+            ),
+        )
         return future
 
     def _watch_draft_item_by_task_id_any_context(self, context, task_id: Optional[str]):
@@ -3595,7 +3615,14 @@ class IXBrowserService:
                     url,
                 )
 
-        context.on("response", lambda resp: asyncio.create_task(handle_response(resp)))
+        context.on(
+            "response",
+            lambda resp: spawn(
+                handle_response(resp),
+                task_name="sora.listen_drafts_browser.response",
+                metadata={"task_id": str(task_id) if task_id else None},
+            ),
+        )
         return future
 
     async def _wait_for_draft_item(self, future, timeout_seconds: int = 12) -> Optional[dict]:
@@ -4726,7 +4753,7 @@ class IXBrowserService:
             if cached and cached[0] == remaining_count and (now - cached[1]) < self._realtime_quota_cache_ttl:
                 return
             self._realtime_quota_cache[int(profile_id)] = (remaining_count, now)
-            asyncio.create_task(
+            spawn(
                 self._record_realtime_quota(
                     profile_id=profile_id,
                     group_title=group_title,
@@ -4734,10 +4761,19 @@ class IXBrowserService:
                     payload=payload,
                     parsed=parsed,
                     source_url=url,
-                )
+                ),
+                task_name="sora.realtime_quota.record",
+                metadata={"profile_id": int(profile_id), "group_title": str(group_title)},
             )
 
-        page.on("response", lambda resp: asyncio.create_task(handle_response(resp)))
+        page.on(
+            "response",
+            lambda resp: spawn(
+                handle_response(resp),
+                task_name="sora.realtime_quota.listen",
+                metadata={"profile_id": int(profile_id), "group_title": str(group_title)},
+            ),
+        )
 
     async def _record_realtime_quota(
         self,
