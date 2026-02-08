@@ -140,6 +140,17 @@ class SoraJobRequest(BaseModel):
         return text
 
 
+class SoraWatermarkParseRequest(BaseModel):
+    share_url: str
+
+
+class SoraWatermarkParseResponse(BaseModel):
+    share_url: str
+    share_id: str
+    watermark_url: str
+    parse_method: str
+
+
 class SoraJob(BaseModel):
     job_id: int
     profile_id: int

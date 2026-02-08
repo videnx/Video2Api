@@ -998,6 +998,56 @@ class IXBrowserService:
         )
         return self.get_sora_job(job_id)
 
+    async def parse_sora_watermark_link(self, share_url: str) -> Dict[str, str]:
+        share_url_text = str(share_url or "").strip()
+        if not share_url_text:
+            raise IXBrowserServiceError("请输入 Sora 分享链接")
+
+        share_id = self._extract_share_id_from_url(share_url_text)
+        if not share_id:
+            raise IXBrowserServiceError("无效的 Sora 分享链接")
+
+        canonical_share_url = f"https://sora.chatgpt.com/p/{share_id}"
+        standard_pattern = rf"^https://sora\.chatgpt\.com/p/{re.escape(share_id)}$"
+        normalized_share_url = share_url_text if re.match(standard_pattern, share_url_text) else canonical_share_url
+
+        config = sqlite_db.get_watermark_free_config() or {}
+        parse_method = str(config.get("parse_method") or "custom").strip().lower()
+        if parse_method not in {"custom", "third_party"}:
+            raise IXBrowserServiceError("去水印解析方式无效")
+
+        parse_url = str(config.get("custom_parse_url") or "").strip()
+        parse_token = str(config.get("custom_parse_token") or "").strip()
+        parse_path = self._normalize_custom_parse_path(str(config.get("custom_parse_path") or ""))
+        retry_max = int(config.get("retry_max") or 0)
+        retry_max = max(0, min(retry_max, 10))
+
+        last_error: Optional[str] = None
+        for _attempt in range(1, retry_max + 2):
+            try:
+                if parse_method == "third_party":
+                    watermark_url = self._build_third_party_watermark_url(normalized_share_url)
+                else:
+                    watermark_url = await self._call_custom_watermark_parse(
+                        publish_url=normalized_share_url,
+                        parse_url=parse_url,
+                        parse_path=parse_path,
+                        parse_token=parse_token,
+                    )
+                if not watermark_url:
+                    raise IXBrowserServiceError("去水印未返回链接")
+                return {
+                    "share_url": normalized_share_url,
+                    "share_id": share_id,
+                    "watermark_url": str(watermark_url),
+                    "parse_method": parse_method,
+                }
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                continue
+
+        raise IXBrowserServiceError(last_error or "去水印解析失败")
+
     async def cancel_sora_job(self, job_id: int) -> SoraJob:
         row = sqlite_db.get_sora_job(job_id)
         if not row:

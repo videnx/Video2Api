@@ -142,6 +142,11 @@ export const retrySoraJobWatermark = async (jobId) => {
   return response.data
 }
 
+export const parseSoraWatermarkLink = async (data) => {
+  const response = await api.post('/sora/watermark/parse', data)
+  return response.data
+}
+
 export const getSoraAccountWeights = async (groupTitle = 'Sora', limit = 100) => {
   const response = await api.get('/sora/accounts/weights', {
     params: { group_title: groupTitle, limit }

@@ -925,6 +925,136 @@ async def test_retry_sora_watermark_requires_failed_status(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_parse_sora_watermark_link_third_party_success(monkeypatch):
+    service = IXBrowserService()
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_watermark_free_config",
+        lambda: {
+            "enabled": True,
+            "parse_method": "third_party",
+            "retry_max": 0,
+        },
+    )
+
+    result = await service.parse_sora_watermark_link("https://sora.chatgpt.com/p/s_12345678")
+    assert result["share_id"] == "s_12345678"
+    assert result["share_url"] == "https://sora.chatgpt.com/p/s_12345678"
+    assert result["parse_method"] == "third_party"
+    assert result["watermark_url"].endswith("/s_12345678.mp4")
+
+
+@pytest.mark.asyncio
+async def test_parse_sora_watermark_link_custom_success_and_normalizes_path(monkeypatch):
+    service = IXBrowserService()
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_watermark_free_config",
+        lambda: {
+            "enabled": True,
+            "parse_method": "custom",
+            "custom_parse_url": "http://127.0.0.1:18080",
+            "custom_parse_token": "abc",
+            "custom_parse_path": "get-sora-link",
+            "retry_max": 0,
+        },
+    )
+
+    called = {}
+
+    async def _fake_parse(*, publish_url, parse_url, parse_path, parse_token):
+        called["publish_url"] = publish_url
+        called["parse_url"] = parse_url
+        called["parse_path"] = parse_path
+        called["parse_token"] = parse_token
+        return "http://example.com/wm.mp4"
+
+    monkeypatch.setattr(service, "_call_custom_watermark_parse", _fake_parse)
+
+    result = await service.parse_sora_watermark_link("s_12345678")
+    assert result["share_id"] == "s_12345678"
+    assert result["share_url"] == "https://sora.chatgpt.com/p/s_12345678"
+    assert result["parse_method"] == "custom"
+    assert result["watermark_url"] == "http://example.com/wm.mp4"
+    assert called["publish_url"] == "https://sora.chatgpt.com/p/s_12345678"
+    assert called["parse_url"] == "http://127.0.0.1:18080"
+    assert called["parse_path"] == "/get-sora-link"
+    assert called["parse_token"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_parse_sora_watermark_link_rejects_invalid_share_url():
+    service = IXBrowserService()
+    with pytest.raises(IXBrowserServiceError, match="无效的 Sora 分享链接"):
+        await service.parse_sora_watermark_link("https://example.com/no-sora")
+
+
+@pytest.mark.asyncio
+async def test_parse_sora_watermark_link_ignores_enabled_switch(monkeypatch):
+    service = IXBrowserService()
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_watermark_free_config",
+        lambda: {
+            "enabled": False,
+            "parse_method": "third_party",
+            "retry_max": 0,
+        },
+    )
+
+    result = await service.parse_sora_watermark_link("https://sora.chatgpt.com/p/s_12345678")
+    assert result["parse_method"] == "third_party"
+    assert result["watermark_url"].endswith("/s_12345678.mp4")
+
+
+@pytest.mark.asyncio
+async def test_parse_sora_watermark_link_custom_requires_parse_url(monkeypatch):
+    service = IXBrowserService()
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_watermark_free_config",
+        lambda: {
+            "enabled": True,
+            "parse_method": "custom",
+            "custom_parse_url": "",
+            "custom_parse_token": "abc",
+            "custom_parse_path": "/get-sora-link",
+            "retry_max": 0,
+        },
+    )
+
+    with pytest.raises(IXBrowserServiceError, match="未配置去水印解析服务器地址"):
+        await service.parse_sora_watermark_link("https://sora.chatgpt.com/p/s_12345678")
+
+
+@pytest.mark.asyncio
+async def test_parse_sora_watermark_link_retry_max_applies(monkeypatch):
+    service = IXBrowserService()
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_watermark_free_config",
+        lambda: {
+            "enabled": True,
+            "parse_method": "custom",
+            "custom_parse_url": "http://127.0.0.1:18080",
+            "custom_parse_token": "abc",
+            "custom_parse_path": "/get-sora-link",
+            "retry_max": 2,
+        },
+    )
+
+    calls = {"count": 0}
+
+    async def _fake_parse(*, publish_url, parse_url, parse_path, parse_token):
+        del publish_url, parse_url, parse_path, parse_token
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise IXBrowserServiceError("解析失败")
+        return "http://example.com/retry-success.mp4"
+
+    monkeypatch.setattr(service, "_call_custom_watermark_parse", _fake_parse)
+
+    result = await service.parse_sora_watermark_link("https://sora.chatgpt.com/p/s_12345678")
+    assert calls["count"] == 3
+    assert result["watermark_url"] == "http://example.com/retry-success.mp4"
+
+
+@pytest.mark.asyncio
 async def test_overload_spawn_is_idempotent_when_child_exists(monkeypatch):
     service = IXBrowserService()
     old_job_id = 10

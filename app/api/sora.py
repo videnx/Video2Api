@@ -12,7 +12,15 @@ from app.core.audit import log_audit
 from app.core.auth import get_current_active_user
 from app.core.config import settings
 from app.db.sqlite import sqlite_db
-from app.models.ixbrowser import SoraAccountWeight, SoraJob, SoraJobCreateResponse, SoraJobEvent, SoraJobRequest
+from app.models.ixbrowser import (
+    SoraAccountWeight,
+    SoraJob,
+    SoraJobCreateResponse,
+    SoraJobEvent,
+    SoraJobRequest,
+    SoraWatermarkParseRequest,
+    SoraWatermarkParseResponse,
+)
 from app.services.account_dispatch_service import account_dispatch_service
 from app.services.ixbrowser_service import (
     ixbrowser_service,
@@ -71,6 +79,50 @@ async def list_sora_account_weights(
 ):
     del current_user
     return await account_dispatch_service.list_account_weights(group_title=group_title, limit=limit)
+
+
+@router.post("/watermark/parse", response_model=SoraWatermarkParseResponse)
+async def parse_sora_watermark_link(
+    payload: SoraWatermarkParseRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_active_user),
+):
+    share_id = ""
+    parse_method = ""
+    try:
+        result = await ixbrowser_service.parse_sora_watermark_link(payload.share_url)
+        share_id = str(result.get("share_id") or "")
+        parse_method = str(result.get("parse_method") or "")
+        log_audit(
+            request=request,
+            current_user=current_user,
+            action="sora.watermark.parse",
+            status="success",
+            message="解析去水印链接",
+            resource_type="watermark",
+            resource_id=share_id or None,
+            extra={
+                "share_id": share_id or None,
+                "parse_method": parse_method or None,
+            },
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        log_audit(
+            request=request,
+            current_user=current_user,
+            action="sora.watermark.parse",
+            status="failed",
+            level="WARN",
+            message=str(exc),
+            resource_type="watermark",
+            resource_id=share_id or None,
+            extra={
+                "share_id": share_id or None,
+                "parse_method": parse_method or None,
+            },
+        )
+        raise
 
 
 @router.get("/jobs", response_model=List[SoraJob])

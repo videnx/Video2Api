@@ -75,7 +75,8 @@ const navGroups = [
     title: '任务',
     items: [
       { path: '/tasks', label: '任务管理' },
-      { path: '/nurture', label: '养号任务' }
+      { path: '/nurture', label: '养号任务' },
+      { path: '/watermark-parse', label: '去水印解析' }
     ]
   },
   {
