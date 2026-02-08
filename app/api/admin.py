@@ -151,6 +151,13 @@ async def stream_system_logs(
 
     async def event_generator():
         last_id = 0
+        # 仅推送连接建立后的增量，避免首次连接回放大量历史日志导致前端阻塞。
+        try:
+            latest = sqlite_db.list_event_logs(source=source_value, limit=1).get("items", [])
+            if latest:
+                last_id = int(latest[0].get("id") or 0)
+        except Exception:
+            last_id = 0
         idle_ticks = 0
         try:
             while True:

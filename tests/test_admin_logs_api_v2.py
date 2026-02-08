@@ -1,8 +1,12 @@
+import asyncio
+import json
 import os
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.admin import stream_system_logs
+from app.core.auth import create_access_token
 from app.core.auth import get_current_active_user
 from app.db.sqlite import sqlite_db
 from app.main import app
@@ -84,3 +88,89 @@ def test_admin_logs_stream_requires_token(client):
 
     bad_token_resp = client.get("/api/v1/admin/logs/stream", params={"token": "bad-token"})
     assert bad_token_resp.status_code == 401
+
+
+def _parse_sse_chunk(chunk):
+    text = chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+    events = []
+    for block in text.split("\n\n"):
+        snippet = block.strip()
+        if not snippet:
+            continue
+        event_name = None
+        data_lines = []
+        for line in snippet.splitlines():
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line.split(":", 1)[1].lstrip())
+        if event_name:
+            events.append((event_name, "\n".join(data_lines).strip()))
+    return events
+
+
+async def _next_event(response, expected=None, max_steps=20):
+    expected_set = set(expected or [])
+    pending = getattr(response, "_sse_pending_events", None)
+    if pending is None:
+        pending = []
+        setattr(response, "_sse_pending_events", pending)
+    for _ in range(max_steps):
+        if not pending:
+            chunk = await asyncio.wait_for(response.body_iterator.__anext__(), timeout=3.0)
+            pending.extend(_parse_sse_chunk(chunk))
+            if not pending:
+                continue
+        name, payload = pending.pop(0)
+        if not expected_set or name in expected_set:
+            return name, payload
+    raise AssertionError(f"未在 {max_steps} 个事件内收到目标事件: {expected_set}")
+
+
+@pytest.mark.asyncio
+async def test_admin_logs_stream_only_pushes_new_rows_after_connect(monkeypatch, temp_db):
+    del temp_db
+    sqlite_db.create_user("stream-user", "x", role="admin")
+    token = create_access_token({"sub": "stream-user"})
+    old_id = sqlite_db.create_event_log(
+        source="api",
+        action="api.request",
+        status="success",
+        level="INFO",
+        message="history",
+        method="GET",
+        path="/api/v1/history",
+    )
+    observed_after_ids = []
+
+    def _fake_list_event_logs_since(*, after_id=0, source=None, limit=200):
+        observed_after_ids.append(int(after_id or 0))
+        if len(observed_after_ids) == 1:
+            return [
+                {
+                    "id": int(after_id or 0) + 1,
+                    "source": source or "all",
+                    "action": "api.request",
+                    "status": "success",
+                    "level": "INFO",
+                    "message": "new",
+                    "path": "/api/v1/new",
+                    "created_at": "2026-02-08 00:00:00",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(sqlite_db, "list_event_logs_since", _fake_list_event_logs_since)
+
+    resp = await stream_system_logs(source="all", token=token)
+    try:
+        event_name, payload = await _next_event(resp, expected={"log"})
+        assert event_name == "log"
+        data = json.loads(payload or "{}")
+        assert observed_after_ids
+        assert observed_after_ids[0] == int(old_id)
+        assert int(data.get("id") or 0) == int(old_id) + 1
+        assert data.get("path") == "/api/v1/new"
+    finally:
+        await resp.body_iterator.aclose()

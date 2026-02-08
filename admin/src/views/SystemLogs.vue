@@ -306,6 +306,12 @@ const scheduleStatsRefresh = () => {
   }, 500)
 }
 
+const isSelfLogQuery = (row) => {
+  if (!row || String(row.source || '').toLowerCase() !== 'api') return false
+  const path = String(row.path || '')
+  return path === '/api/v1/admin/logs' || path === '/api/v1/admin/logs/stats'
+}
+
 const loadLogs = async ({ append = false } = {}) => {
   if (append) loadingMore.value = true
   else loading.value = true
@@ -420,7 +426,7 @@ const startRealtime = () => {
       if (logs.value.some((item) => Number(item.id || 0) === rowId)) return
       logs.value = [row, ...logs.value]
       if (logs.value.length > 500) logs.value = logs.value.slice(0, 500)
-      scheduleStatsRefresh()
+      if (!isSelfLogQuery(row)) scheduleStatsRefresh()
     } catch {
       // noop
     }
