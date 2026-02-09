@@ -171,6 +171,8 @@ class SQLiteDB:
                 custom_parse_token TEXT,
                 custom_parse_path TEXT NOT NULL DEFAULT '/get-sora-link',
                 retry_max INTEGER NOT NULL DEFAULT 2,
+                fallback_on_failure INTEGER NOT NULL DEFAULT 1,
+                auto_delete_published_post INTEGER NOT NULL DEFAULT 0,
                 updated_at TIMESTAMP NOT NULL
             )
             '''
@@ -308,6 +310,8 @@ class SQLiteDB:
                 progress INTEGER NOT NULL DEFAULT 0,
                 publish_status TEXT NOT NULL DEFAULT 'queued',
                 publish_url TEXT,
+                publish_post_id TEXT,
+                publish_permalink TEXT,
                 publish_error TEXT,
                 publish_attempts INTEGER NOT NULL DEFAULT 0,
                 published_at TIMESTAMP,
@@ -344,6 +348,14 @@ class SQLiteDB:
             cursor.execute(
                 "ALTER TABLE ixbrowser_sora_generate_jobs ADD COLUMN publish_url TEXT"
             )
+        if "publish_post_id" not in columns:
+            cursor.execute(
+                "ALTER TABLE ixbrowser_sora_generate_jobs ADD COLUMN publish_post_id TEXT"
+            )
+        if "publish_permalink" not in columns:
+            cursor.execute(
+                "ALTER TABLE ixbrowser_sora_generate_jobs ADD COLUMN publish_permalink TEXT"
+            )
         if "publish_error" not in columns:
             cursor.execute(
                 "ALTER TABLE ixbrowser_sora_generate_jobs ADD COLUMN publish_error TEXT"
@@ -378,6 +390,8 @@ class SQLiteDB:
                 task_id TEXT,
                 generation_id TEXT,
                 publish_url TEXT,
+                publish_post_id TEXT,
+                publish_permalink TEXT,
                 dispatch_mode TEXT,
                 dispatch_score REAL,
                 dispatch_quantity_score REAL,
@@ -436,6 +450,14 @@ class SQLiteDB:
         if "watermark_finished_at" not in columns:
             cursor.execute(
                 "ALTER TABLE sora_jobs ADD COLUMN watermark_finished_at TIMESTAMP"
+            )
+        if "publish_post_id" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN publish_post_id TEXT"
+            )
+        if "publish_permalink" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN publish_permalink TEXT"
             )
         if "dispatch_mode" not in columns:
             cursor.execute(
@@ -642,6 +664,14 @@ class SQLiteDB:
             cursor.execute(
                 "ALTER TABLE watermark_free_config ADD COLUMN retry_max INTEGER NOT NULL DEFAULT 2"
             )
+        if "fallback_on_failure" not in wm_columns:
+            cursor.execute(
+                "ALTER TABLE watermark_free_config ADD COLUMN fallback_on_failure INTEGER NOT NULL DEFAULT 1"
+            )
+        if "auto_delete_published_post" not in wm_columns:
+            cursor.execute(
+                "ALTER TABLE watermark_free_config ADD COLUMN auto_delete_published_post INTEGER NOT NULL DEFAULT 0"
+            )
 
         cursor.execute("SELECT COUNT(*) as cnt FROM watermark_free_config WHERE id = 1")
         wm_count_row = cursor.fetchone()
@@ -652,10 +682,10 @@ class SQLiteDB:
                 '''
                 INSERT INTO watermark_free_config (
                     id, enabled, parse_method, custom_parse_url, custom_parse_token,
-                    custom_parse_path, retry_max, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    custom_parse_path, retry_max, fallback_on_failure, auto_delete_published_post, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
-                (1, 1, "custom", None, None, "/get-sora-link", 2, now)
+                (1, 1, "custom", None, None, "/get-sora-link", 2, 1, 0, now)
             )
 
         conn.commit()
@@ -1259,10 +1289,10 @@ class SQLiteDB:
             '''
             INSERT INTO ixbrowser_sora_generate_jobs (
                 profile_id, window_name, group_title, prompt, duration, aspect_ratio, status, progress,
-                publish_status, publish_url, publish_error, publish_attempts, published_at,
+                publish_status, publish_url, publish_post_id, publish_permalink, publish_error, publish_attempts, published_at,
                 task_id, task_url, error, submit_attempts, poll_attempts, elapsed_ms,
                 operator_user_id, operator_username, started_at, finished_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 int(data.get("profile_id") or 0),
@@ -1275,6 +1305,8 @@ class SQLiteDB:
                 int(data.get("progress") or 0),
                 str(data.get("publish_status") or "queued"),
                 data.get("publish_url"),
+                data.get("publish_post_id"),
+                data.get("publish_permalink"),
                 data.get("publish_error"),
                 int(data.get("publish_attempts") or 0),
                 data.get("published_at"),
@@ -1305,7 +1337,7 @@ class SQLiteDB:
             "status", "task_id", "task_url", "error", "submit_attempts", "poll_attempts",
             "elapsed_ms", "started_at", "finished_at", "window_name", "progress",
             "publish_status", "publish_url", "publish_error", "publish_attempts", "published_at",
-            "generation_id"
+            "generation_id", "publish_post_id", "publish_permalink",
         }
         sets = []
         params = []
@@ -1364,12 +1396,12 @@ class SQLiteDB:
             '''
             INSERT INTO sora_jobs (
                 profile_id, window_name, group_title, prompt, image_url, duration, aspect_ratio,
-                status, phase, progress_pct, task_id, generation_id, publish_url,
+                status, phase, progress_pct, task_id, generation_id, publish_url, publish_post_id, publish_permalink,
                 dispatch_mode, dispatch_score, dispatch_quantity_score, dispatch_quality_score, dispatch_reason,
                 retry_of_job_id, retry_root_job_id, retry_index,
                 error,
                 started_at, finished_at, operator_user_id, operator_username, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 int(data.get("profile_id") or 0),
@@ -1385,6 +1417,8 @@ class SQLiteDB:
                 data.get("task_id"),
                 data.get("generation_id"),
                 data.get("publish_url"),
+                data.get("publish_post_id"),
+                data.get("publish_permalink"),
                 data.get("dispatch_mode"),
                 data.get("dispatch_score"),
                 data.get("dispatch_quantity_score"),
@@ -1425,6 +1459,8 @@ class SQLiteDB:
             "task_id",
             "generation_id",
             "publish_url",
+            "publish_post_id",
+            "publish_permalink",
             "dispatch_mode",
             "dispatch_score",
             "dispatch_quantity_score",
@@ -2548,6 +2584,8 @@ class SQLiteDB:
             "task_id": row.get("task_id"),
             "generation_id": row.get("generation_id"),
             "publish_url": row.get("publish_url"),
+            "publish_post_id": row.get("publish_post_id"),
+            "publish_permalink": row.get("publish_permalink"),
             "prompt": row.get("prompt"),
             "job_status": row.get("status"),
         }
@@ -2874,10 +2912,10 @@ class SQLiteDB:
                 '''
                 INSERT INTO watermark_free_config (
                     id, enabled, parse_method, custom_parse_url, custom_parse_token,
-                    custom_parse_path, retry_max, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    custom_parse_path, retry_max, fallback_on_failure, auto_delete_published_post, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
-                (1, 1, "custom", None, None, "/get-sora-link", 2, now)
+                (1, 1, "custom", None, None, "/get-sora-link", 2, 1, 0, now)
             )
             conn.commit()
             cursor.execute("SELECT * FROM watermark_free_config WHERE id = 1")
@@ -2896,6 +2934,8 @@ class SQLiteDB:
             "custom_parse_token",
             "custom_parse_path",
             "retry_max",
+            "fallback_on_failure",
+            "auto_delete_published_post",
         }
         sets = []
         params = []

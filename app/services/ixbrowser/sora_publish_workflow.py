@@ -155,6 +155,21 @@ class SoraPublishWorkflow:
                         )
 
                 if not draft_generation:
+                    draft_generation, manual_item = await self._resolve_generation_id_by_task_id(
+                        task_id=task_id,
+                        page=page,
+                        context=context,
+                        limit=100,
+                        max_pages=12,
+                        retries=2,
+                        delay_ms=1200,
+                    )
+                    if isinstance(manual_item, dict):
+                        existing_link = self._extract_publish_url(str(manual_item))
+                        if existing_link:
+                            return existing_link
+
+                if not draft_generation:
                     logger.info(
                         "发布重试未获取 generation_id: profile=%s task_id=%s current_url=%s",
                         profile_id,
@@ -177,6 +192,16 @@ class SoraPublishWorkflow:
                     page.url,
                 )
                 await self._clear_caption_input(page)
+                existing_publish = await self._fetch_publish_result_from_posts(page, draft_generation)
+                if existing_publish.get("publish_url"):
+                    logger.info(
+                        "发布重试命中已发布内容: profile=%s task_id=%s generation_id=%s publish_url=%s",
+                        profile_id,
+                        task_id,
+                        draft_generation,
+                        existing_publish.get("publish_url"),
+                    )
+                    return existing_publish.get("publish_url")
                 api_publish = await self._publish_sora_post_with_backoff(
                     page,
                     task_id=task_id,
@@ -186,15 +211,17 @@ class SoraPublishWorkflow:
                     max_attempts=5,
                 )
                 if api_publish and api_publish.get("publish_url"):
-                    return api_publish["publish_url"]
-                if api_publish and api_publish.get("error"):
+                    await self._maybe_auto_delete_published_post(page, api_publish, generation_id=draft_generation)
+                    return api_publish.get("publish_url")
+                error_text = self._publish_result_error_text(api_publish)
+                if api_publish and error_text:
                     logger.info(
                         "发布重试 API 发布失败: profile=%s task_id=%s error=%s",
                         profile_id,
                         task_id,
-                        api_publish.get("error"),
+                        error_text,
                     )
-                    if "duplicate" in str(api_publish.get("error")).lower():
+                    if self._is_duplicate_publish_error(api_publish):
                         try:
                             existing = await self._wait_for_publish_url(publish_future, page, timeout_seconds=20)
                         except Exception:  # noqa: BLE001
@@ -228,12 +255,12 @@ class SoraPublishWorkflow:
                         share_id = self._find_share_id(draft_item)
                         if share_id:
                             return f"https://sora.chatgpt.com/p/{share_id}"
-                        post_link = await self._fetch_publish_url_from_posts(page, draft_generation)
-                        if post_link:
-                            return post_link
-                        gen_link = await self._fetch_publish_url_from_generation(page, draft_generation)
-                        if gen_link:
-                            return gen_link
+                        post_result = await self._fetch_publish_result_from_posts(page, draft_generation)
+                        if post_result.get("publish_url"):
+                            return post_result.get("publish_url")
+                        gen_result = await self._fetch_publish_result_from_generation(page, draft_generation)
+                        if gen_result.get("publish_url"):
+                            return gen_result.get("publish_url")
                 existing_dom_link = await self._find_publish_url_from_dom(page)
                 if existing_dom_link:
                     return existing_dom_link
@@ -307,6 +334,21 @@ class SoraPublishWorkflow:
                 )
 
         if not draft_generation:
+            draft_generation, manual_item = await self._resolve_generation_id_by_task_id(
+                task_id=task_id,
+                page=page,
+                context=page.context if hasattr(page, "context") else None,
+                limit=100,
+                max_pages=12,
+                retries=2,
+                delay_ms=1200,
+            )
+            if isinstance(manual_item, dict):
+                existing_link = self._extract_publish_url(str(manual_item))
+                if existing_link:
+                    return existing_link
+
+        if not draft_generation:
             logger.info(
                 "发布流程未获取 generation_id: task_id=%s current_url=%s",
                 task_id,
@@ -327,6 +369,15 @@ class SoraPublishWorkflow:
             page.url,
         )
         await self._clear_caption_input(page)
+        existing_publish = await self._fetch_publish_result_from_posts(page, draft_generation)
+        if existing_publish.get("publish_url"):
+            logger.info(
+                "发布流程命中已发布内容: task_id=%s generation_id=%s publish_url=%s",
+                task_id,
+                draft_generation,
+                existing_publish.get("publish_url"),
+            )
+            return existing_publish.get("publish_url")
         api_publish = await self._publish_sora_post_with_backoff(
             page,
             task_id=task_id,
@@ -336,10 +387,12 @@ class SoraPublishWorkflow:
             max_attempts=5,
         )
         if api_publish.get("publish_url"):
-            return api_publish["publish_url"]
-        if api_publish.get("error"):
-            logger.info("发布流程 API 发布失败: task_id=%s error=%s", task_id, api_publish.get("error"))
-            if "duplicate" in str(api_publish.get("error")).lower():
+            await self._maybe_auto_delete_published_post(page, api_publish, generation_id=draft_generation)
+            return api_publish.get("publish_url")
+        error_text = self._publish_result_error_text(api_publish)
+        if error_text:
+            logger.info("发布流程 API 发布失败: task_id=%s error=%s", task_id, error_text)
+            if self._is_duplicate_publish_error(api_publish):
                 try:
                     existing = await self._wait_for_publish_url(publish_future, page, timeout_seconds=20)
                 except Exception:  # noqa: BLE001
@@ -368,12 +421,12 @@ class SoraPublishWorkflow:
                 share_id = self._find_share_id(draft_item)
                 if share_id:
                     return f"https://sora.chatgpt.com/p/{share_id}"
-                post_link = await self._fetch_publish_url_from_posts(page, draft_generation)
-                if post_link:
-                    return post_link
-                gen_link = await self._fetch_publish_url_from_generation(page, draft_generation)
-                if gen_link:
-                    return gen_link
+                post_result = await self._fetch_publish_result_from_posts(page, draft_generation)
+                if post_result.get("publish_url"):
+                    return post_result.get("publish_url")
+                gen_result = await self._fetch_publish_result_from_generation(page, draft_generation)
+                if gen_result.get("publish_url"):
+                    return gen_result.get("publish_url")
         existing_dom_link = await self._find_publish_url_from_dom(page)
         if existing_dom_link:
             return existing_dom_link
@@ -448,6 +501,228 @@ class SoraPublishWorkflow:
         if share_id:
             return f"https://sora.chatgpt.com/p/{share_id}"
         return None
+
+    def _build_publish_result(
+        self,
+        *,
+        publish_url: Optional[str] = None,
+        post_id: Optional[str] = None,
+        permalink: Optional[str] = None,
+        status: Optional[str] = None,
+        raw_error: Optional[str] = None,
+        error_code: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        url = str(publish_url or "").strip() or None
+        if url and not self._is_valid_publish_url(url):
+            extracted = self._extract_publish_url(url)
+            url = extracted if extracted and self._is_valid_publish_url(extracted) else None
+
+        link = self._normalize_publish_permalink(permalink)
+        if not link and url:
+            link = url
+        if not url and link:
+            url = self._extract_publish_url(link)
+            if url and not self._is_valid_publish_url(url):
+                url = None
+
+        pid = str(post_id or "").strip() or None
+        err = str(raw_error or "").strip() or None
+        code = str(error_code or "").strip().lower() or None
+        if not code and err:
+            code = self._extract_publish_error_code(err, parsed=None)
+        final_status = str(status or "").strip() or ("published" if url else "failed")
+        return {
+            "publish_url": url,
+            "post_id": pid,
+            "permalink": link,
+            "status": final_status,
+            "raw_error": err,
+            "error_code": code,
+        }
+
+    def _normalize_publish_permalink(self, value: Optional[str]) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.startswith("/p/s_"):
+            return f"https://sora.chatgpt.com{text}"
+        if text.startswith("https://sora.chatgpt.com/p/") and self._is_valid_publish_url(text):
+            return text
+        sid = self._extract_share_id(text)
+        if sid:
+            return f"https://sora.chatgpt.com/p/{sid}"
+        return None
+
+    def _extract_publish_error_code(self, raw_text: Optional[str], parsed: Any = None) -> Optional[str]:
+        candidates: List[str] = []
+        if isinstance(parsed, dict):
+            error_obj = parsed.get("error")
+            if isinstance(error_obj, dict):
+                for key in ("code", "type", "error_code"):
+                    value = error_obj.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append(value.strip().lower())
+            for key in ("error_code", "errorCode", "code"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip().lower())
+
+        blob = str(raw_text or "").strip().lower()
+        if blob:
+            if "duplicate" in blob:
+                return "duplicate"
+            if (
+                "invalid_request_error" in blob
+                or "\"code\": \"invalid_request\"" in blob
+                or "\"code\":\"invalid_request\"" in blob
+            ):
+                return "invalid_request"
+
+        for item in candidates:
+            if item == "invalid_request_error":
+                return "invalid_request"
+            if item == "invalid_request":
+                return "invalid_request"
+            if "duplicate" in item:
+                return "duplicate"
+            return item
+        return None
+
+    def _extract_publish_error_message(self, raw_text: Optional[str], parsed: Any = None) -> Optional[str]:
+        if isinstance(parsed, dict):
+            error_obj = parsed.get("error")
+            if isinstance(error_obj, dict):
+                for key in ("message", "msg", "detail"):
+                    value = error_obj.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+            for key in ("error_message", "error", "message", "detail"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        text = str(raw_text or "").strip()
+        if not text:
+            return None
+        if len(text) > 600:
+            return text[:600] + "..."
+        return text
+
+    def _find_publish_post_id(self, parsed: Any) -> Optional[str]:
+        if not isinstance(parsed, dict):
+            return None
+
+        post = parsed.get("post")
+        if isinstance(post, dict):
+            for key in ("id", "post_id", "postId"):
+                value = post.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        for key in ("post_id", "postId"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        share_id = self._find_share_id(parsed)
+        if share_id:
+            return share_id
+        return None
+
+    def _find_publish_permalink(self, parsed: Any) -> Optional[str]:
+        if not isinstance(parsed, dict):
+            return None
+
+        post = parsed.get("post")
+        if isinstance(post, dict):
+            for key in ("permalink", "share_url", "shareUrl", "public_url", "publicUrl", "url"):
+                value = post.get(key)
+                link = self._normalize_publish_permalink(value if isinstance(value, str) else None)
+                if link:
+                    return link
+
+        for key in ("permalink", "share_url", "shareUrl", "public_url", "publicUrl", "url"):
+            value = parsed.get(key)
+            link = self._normalize_publish_permalink(value if isinstance(value, str) else None)
+            if link:
+                return link
+        return None
+
+    def _parse_publish_result_payload(
+        self,
+        payload: Any,
+        *,
+        status: Optional[str] = None,
+        fallback_error: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        parsed = None
+        raw_text: Optional[str] = None
+        if isinstance(payload, (dict, list)):
+            parsed = payload
+            try:
+                raw_text = json.dumps(payload, ensure_ascii=False)
+            except Exception:  # noqa: BLE001
+                raw_text = str(payload)
+        elif isinstance(payload, str):
+            raw_text = payload
+            try:
+                parsed = json.loads(payload)
+            except Exception:  # noqa: BLE001
+                parsed = None
+        elif payload is not None:
+            raw_text = str(payload)
+
+        publish_url = self._extract_publish_url(raw_text)
+        if not publish_url and parsed is not None:
+            try:
+                parsed_blob = json.dumps(parsed, ensure_ascii=False)
+            except Exception:  # noqa: BLE001
+                parsed_blob = str(parsed)
+            publish_url = self._extract_publish_url(parsed_blob)
+
+        post_id = self._find_publish_post_id(parsed)
+        permalink = self._find_publish_permalink(parsed)
+        if not permalink and publish_url:
+            permalink = publish_url
+
+        error_code = self._extract_publish_error_code(raw_text, parsed)
+        raw_error = self._extract_publish_error_message(raw_text, parsed)
+        if fallback_error and not raw_error:
+            raw_error = str(fallback_error).strip() or None
+        if fallback_error and not error_code:
+            error_code = self._extract_publish_error_code(str(fallback_error), parsed=None)
+
+        if publish_url:
+            raw_error = None
+            error_code = None
+
+        return self._build_publish_result(
+            publish_url=publish_url,
+            post_id=post_id,
+            permalink=permalink,
+            status=status,
+            raw_error=raw_error,
+            error_code=error_code,
+        )
+
+    @staticmethod
+    def _publish_result_error_text(result: Optional[Dict[str, Optional[str]]]) -> str:
+        if not isinstance(result, dict):
+            return ""
+        raw_error = str(result.get("raw_error") or "").strip()
+        if raw_error:
+            return raw_error
+        return str(result.get("error_code") or "").strip()
+
+    @staticmethod
+    def _is_duplicate_publish_error(result: Optional[Dict[str, Optional[str]]]) -> bool:
+        if not isinstance(result, dict):
+            return False
+        code = str(result.get("error_code") or "").strip().lower()
+        if code == "duplicate":
+            return True
+        raw_error = str(result.get("raw_error") or "").strip().lower()
+        return "duplicate" in raw_error
 
     def _extract_share_id(self, text: str) -> Optional[str]:
         if not text:
@@ -1195,9 +1470,46 @@ class SoraPublishWorkflow:
 
         return None
 
-    async def _fetch_publish_url_from_posts(self, page, generation_id: str) -> Optional[str]:
+    async def _resolve_generation_id_by_task_id(
+        self,
+        *,
+        task_id: Optional[str],
+        page=None,
+        context=None,
+        limit: int = 15,
+        max_pages: int = 3,
+        retries: int = 2,
+        delay_ms: int = 1200,
+    ) -> Tuple[Optional[str], Optional[dict]]:
+        if not task_id:
+            return None, None
+
+        draft_item = None
+        if page is not None:
+            draft_item = await self._fetch_draft_item_by_task_id(
+                page=page,
+                task_id=task_id,
+                limit=limit,
+                max_pages=max_pages,
+                retries=retries,
+                delay_ms=delay_ms,
+            )
+        if draft_item is None and context is not None:
+            draft_item = await self._fetch_draft_item_by_task_id_via_context(
+                context=context,
+                task_id=task_id,
+                limit=limit,
+                max_pages=max_pages,
+            )
+
+        generation_id = self._extract_generation_id(draft_item) if isinstance(draft_item, dict) else None
+        if generation_id and isinstance(draft_item, dict) and "generation_id" not in draft_item:
+            draft_item["generation_id"] = generation_id
+        return generation_id, draft_item if isinstance(draft_item, dict) else None
+
+    async def _fetch_publish_result_from_posts(self, page, generation_id: str) -> Dict[str, Optional[str]]:
         if not generation_id:
-            return None
+            return self._build_publish_result(status="not_found", raw_error="缺少 generation_id", error_code="missing_generation_id")
         data = await page.evaluate(
             """
             async ({generationId}) => {
@@ -1278,16 +1590,16 @@ class SoraPublishWorkflow:
             {"generationId": generation_id}
         )
         if isinstance(data, str) and data.strip():
-            return self._extract_publish_url(data) or (
-                f"https://sora.chatgpt.com/p/{self._find_share_id(data)}"
-                if self._find_share_id(data)
-                else None
-            )
-        return None
+            return self._parse_publish_result_payload(data, status="published")
+        return self._build_publish_result(status="not_found", raw_error="未命中已发布内容", error_code="not_found")
 
-    async def _fetch_publish_url_from_generation(self, page, generation_id: str) -> Optional[str]:
+    async def _fetch_publish_url_from_posts(self, page, generation_id: str) -> Optional[str]:
+        result = await self._fetch_publish_result_from_posts(page, generation_id)
+        return result.get("publish_url")
+
+    async def _fetch_publish_result_from_generation(self, page, generation_id: str) -> Dict[str, Optional[str]]:
         if not generation_id:
-            return None
+            return self._build_publish_result(status="not_found", raw_error="缺少 generation_id", error_code="missing_generation_id")
         data = await page.evaluate(
             """
             async ({generationId}) => {
@@ -1338,12 +1650,12 @@ class SoraPublishWorkflow:
             {"generationId": generation_id}
         )
         if isinstance(data, str) and data.strip():
-            return self._extract_publish_url(data) or (
-                f"https://sora.chatgpt.com/p/{self._find_share_id(data)}"
-                if self._find_share_id(data)
-                else None
-            )
-        return None
+            return self._parse_publish_result_payload(data, status="published")
+        return self._build_publish_result(status="not_found", raw_error="未命中 generation 详情", error_code="not_found")
+
+    async def _fetch_publish_url_from_generation(self, page, generation_id: str) -> Optional[str]:
+        result = await self._fetch_publish_result_from_generation(page, generation_id)
+        return result.get("publish_url")
 
     async def _fetch_draft_item_by_generation_id(self, page, generation_id: str) -> Optional[dict]:
         if not generation_id:
@@ -2382,8 +2694,13 @@ class SoraPublishWorkflow:
         created_after: Optional[str] = None,
         generation_id: Optional[str] = None,
     ) -> Dict[str, Optional[str]]:
+        del task_id, prompt, created_after
         if not generation_id:
-            return {"publish_url": None, "error": "未捕获草稿 generation_id"}
+            return self._build_publish_result(
+                status="failed",
+                raw_error="未捕获草稿 generation_id",
+                error_code="missing_generation_id",
+            )
 
         # 等待 SentinelSDK 准备就绪，避免发布接口因缺少 token 失败
         for _ in range(12):
@@ -2486,11 +2803,15 @@ class SoraPublishWorkflow:
             {"generationId": generation_id, "deviceId": device_id}
         )
         if not isinstance(data, dict):
-            return {"publish_url": None, "error": "发布返回格式异常"}
+            return self._build_publish_result(
+                status="failed",
+                raw_error="发布返回格式异常",
+                error_code="invalid_response",
+            )
 
         text = data.get("publish_url")
         raw_text = data.get("raw_text") or text
-        status = data.get("status")
+        http_status = data.get("status")
         headers = data.get("headers")
         if headers:
             try:
@@ -2502,27 +2823,35 @@ class SoraPublishWorkflow:
             snippet = raw_text.strip() if isinstance(raw_text, str) else str(raw_text)
             if len(snippet) > 400:
                 snippet = snippet[:400] + "..."
-            logger.info("发布接口响应: status=%s body=%s", status, snippet)
-        extracted = self._extract_publish_url(text) or self._extract_publish_url(raw_text)
-        if extracted:
-            return {"publish_url": extracted, "error": None}
+            logger.info("发布接口响应: status=%s body=%s", http_status, snippet)
 
-        # 尝试从 JSON 中解析 share_id/public_id
+        status_text: Optional[str] = None
         try:
-            parsed = json.loads(raw_text) if isinstance(raw_text, str) else None
+            code = int(http_status)
+            status_text = "published" if 200 <= code < 300 else "failed"
         except Exception:  # noqa: BLE001
-            parsed = None
-        share_id = self._find_share_id(parsed)
-        if share_id:
-            return {"publish_url": f"https://sora.chatgpt.com/p/{share_id}", "error": None}
+            status_text = None
 
-        raw_text = raw_text or data.get("publish_url")
-        if isinstance(raw_text, str) and raw_text.strip():
-            snippet = raw_text.strip()
-            if len(snippet) > 300:
-                snippet = snippet[:300] + "..."
-            return {"publish_url": None, "error": f"发布未返回链接: {snippet}"}
-        return {"publish_url": None, "error": data.get("error") or "发布未返回链接"}
+        result = self._parse_publish_result_payload(
+            raw_text or text,
+            status=status_text,
+            fallback_error=data.get("error"),
+        )
+        if result.get("publish_url"):
+            if not result.get("post_id"):
+                share_id = self._extract_share_id(str(result.get("publish_url")))
+                if share_id:
+                    result["post_id"] = share_id
+            return result
+
+        fallback_error = str(data.get("error") or "发布未返回链接").strip() or "发布未返回链接"
+        if not result.get("raw_error"):
+            result["raw_error"] = fallback_error
+        if not result.get("error_code"):
+            result["error_code"] = self._extract_publish_error_code(fallback_error, parsed=None)
+        if not result.get("status"):
+            result["status"] = "failed"
+        return result
 
     async def _publish_sora_post_with_backoff(
         self,
@@ -2548,7 +2877,11 @@ class SoraPublishWorkflow:
             max_attempts_int = 1
         attempts = min(max_attempts_int, len(delays_ms))
 
-        last_result: Dict[str, Optional[str]] = {"publish_url": None, "error": "发布未返回链接"}
+        last_result: Dict[str, Optional[str]] = self._build_publish_result(
+            status="failed",
+            raw_error="发布未返回链接",
+            error_code="unknown",
+        )
         for attempt_idx in range(attempts):
             attempt_no = attempt_idx + 1
 
@@ -2595,23 +2928,30 @@ class SoraPublishWorkflow:
                 raise
 
             if not isinstance(data, dict):
-                return {"publish_url": None, "error": "发布返回格式异常"}
+                return self._build_publish_result(
+                    status="failed",
+                    raw_error="发布返回格式异常",
+                    error_code="invalid_response",
+                )
 
-            last_result = {
-                "publish_url": data.get("publish_url"),
-                "error": data.get("error"),
-            }
+            last_result = self._build_publish_result(
+                publish_url=data.get("publish_url"),
+                post_id=data.get("post_id"),
+                permalink=data.get("permalink"),
+                status=data.get("status"),
+                raw_error=data.get("raw_error") or data.get("error"),
+                error_code=data.get("error_code"),
+            )
             if last_result.get("publish_url"):
                 return last_result
 
-            error = str(last_result.get("error") or "").strip()
+            error = self._publish_result_error_text(last_result)
             if not error:
                 return last_result
-            lower = error.lower()
-            if "duplicate" in lower:
+            if self._is_duplicate_publish_error(last_result):
                 return last_result
 
-            if self._is_sora_publish_not_ready_error(error) and attempt_idx < attempts - 1:
+            if self._is_sora_publish_not_ready_error(error, error_code=last_result.get("error_code")) and attempt_idx < attempts - 1:
                 next_delay_ms = delays_ms[attempt_idx + 1]
                 try:
                     url = page.url
@@ -2630,6 +2970,116 @@ class SoraPublishWorkflow:
             return last_result
 
         return last_result
+
+    def _is_sora_publish_not_ready_error(self, text: str, *, error_code: Optional[str] = None) -> bool:
+        code = str(error_code or "").strip().lower()
+        if code in {"invalid_request", "invalid_request_error"}:
+            return True
+        message = str(text or "").strip()
+        if not message:
+            return False
+        lower = message.lower()
+        if "invalid_request_error" in lower:
+            return True
+        if "\"code\": \"invalid_request\"" in lower:
+            return True
+        if "\"code\":\"invalid_request\"" in lower:
+            return True
+        return False
+
+    def _is_auto_delete_published_post_enabled(self) -> bool:
+        try:
+            config = sqlite_db.get_watermark_free_config() or {}
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(config.get("auto_delete_published_post", False))
+
+    async def _delete_published_post_from_page(self, page, post_id: str) -> bool:
+        data = await page.evaluate(
+            """
+            async ({postId}) => {
+              if (!postId) return { ok: false, status: null, error: "missing post id" };
+              const headers = { "Accept": "application/json" };
+              try {
+                const didMatch = document.cookie.match(/(?:^|; )oai-did=([^;]+)/);
+                if (didMatch && didMatch[1]) headers["OAI-Device-Id"] = decodeURIComponent(didMatch[1]);
+              } catch (e) {}
+              try {
+                const sessionResp = await fetch("https://sora.chatgpt.com/api/auth/session", {
+                  method: "GET",
+                  credentials: "include"
+                });
+                const sessionText = await sessionResp.text();
+                let sessionJson = null;
+                try { sessionJson = JSON.parse(sessionText); } catch (e) {}
+                const accessToken = sessionJson?.accessToken || null;
+                if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+              } catch (e) {}
+
+              const endpoints = [
+                `https://sora.chatgpt.com/backend/project_y/post/${encodeURIComponent(postId)}`,
+                `/backend/project_y/post/${encodeURIComponent(postId)}`
+              ];
+              let last = { ok: false, status: null, error: null };
+              for (const url of endpoints) {
+                try {
+                  const resp = await fetch(url, {
+                    method: "DELETE",
+                    credentials: "include",
+                    headers
+                  });
+                  const text = await resp.text();
+                  if (resp.ok || resp.status === 404) {
+                    return { ok: true, status: resp.status, error: null };
+                  }
+                  last = { ok: false, status: resp.status, error: text || null };
+                } catch (e) {
+                  last = { ok: false, status: null, error: String(e) };
+                }
+              }
+              return last;
+            }
+            """,
+            {"postId": post_id},
+        )
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("ok"))
+
+    async def _maybe_auto_delete_published_post(
+        self,
+        page,
+        publish_result: Optional[Dict[str, Optional[str]]],
+        *,
+        generation_id: Optional[str] = None,
+    ) -> None:
+        if not self._is_auto_delete_published_post_enabled():
+            return
+        if not isinstance(publish_result, dict):
+            return
+
+        post_id = str(publish_result.get("post_id") or "").strip()
+        if not post_id:
+            share_id = self._extract_share_id(str(publish_result.get("publish_url") or ""))
+            post_id = share_id or ""
+        if not post_id:
+            logger.info(
+                "发布后清理跳过: 缺少 post_id generation_id=%s publish_url=%s",
+                generation_id,
+                publish_result.get("publish_url"),
+            )
+            return
+
+        try:
+            deleted = await self._delete_published_post_from_page(page, post_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("发布后清理失败(忽略): generation_id=%s post_id=%s error=%s", generation_id, post_id, exc)
+            return
+
+        if deleted:
+            logger.info("发布后清理成功: generation_id=%s post_id=%s", generation_id, post_id)
+        else:
+            logger.info("发布后清理未成功(忽略): generation_id=%s post_id=%s", generation_id, post_id)
 
     def _pick_progress(self, obj: Any) -> Any:
         if not isinstance(obj, dict):

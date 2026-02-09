@@ -250,6 +250,8 @@ class WatermarkFreeSettings(BaseModel):
     custom_parse_token: Optional[str] = None
     custom_parse_path: str = "/get-sora-link"
     retry_max: int = Field(2, ge=0, le=10)
+    fallback_on_failure: bool = True
+    auto_delete_published_post: bool = False
 
     @field_validator("parse_method")
     @classmethod

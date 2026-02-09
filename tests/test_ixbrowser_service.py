@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 from types import SimpleNamespace
@@ -1765,6 +1766,97 @@ async def test_publish_sora_post_with_backoff_retries_invalid_request():
     assert 2000 in page.waits
     assert 4000 in page.waits
     assert result["publish_url"] == "https://sora.chatgpt.com/p/s_12345678"
+
+
+def test_parse_publish_result_payload_supports_post_and_error_codes():
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    ok_payload = json.dumps(
+        {
+            "post": {
+                "id": "s_12345678",
+                "permalink": "https://sora.chatgpt.com/p/s_12345678",
+            }
+        }
+    )
+    ok_result = publish_workflow._parse_publish_result_payload(ok_payload)  # noqa: SLF001
+    assert ok_result["publish_url"] == "https://sora.chatgpt.com/p/s_12345678"
+    assert ok_result["post_id"] == "s_12345678"
+    assert ok_result["permalink"] == "https://sora.chatgpt.com/p/s_12345678"
+    assert ok_result["error_code"] is None
+
+    duplicate_payload = '{"error":{"code":"duplicate","message":"already exists"}}'
+    duplicate_result = publish_workflow._parse_publish_result_payload(duplicate_payload)  # noqa: SLF001
+    assert duplicate_result["publish_url"] is None
+    assert duplicate_result["error_code"] == "duplicate"
+
+    invalid_payload = '{"error":{"type":"invalid_request_error","message":"not ready"}}'
+    invalid_result = publish_workflow._parse_publish_result_payload(invalid_payload)  # noqa: SLF001
+    assert invalid_result["publish_url"] is None
+    assert invalid_result["error_code"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_publish_from_page_prefers_existing_post_before_create(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    class _DummyPage:
+        def __init__(self):
+            self.url = "https://sora.chatgpt.com/drafts"
+            self.context = SimpleNamespace()
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+
+        async def wait_for_timeout(self, _ms):
+            return None
+
+    page = _DummyPage()
+    called = {"publish": False}
+
+    async def _fake_clear_caption(_page):
+        return None
+
+    async def _fake_fetch_publish_result(_page, _generation_id):
+        return {
+            "publish_url": "https://sora.chatgpt.com/p/s_12345678",
+            "post_id": "s_12345678",
+            "permalink": "https://sora.chatgpt.com/p/s_12345678",
+            "status": "published",
+            "raw_error": None,
+            "error_code": None,
+        }
+
+    async def _fake_publish_with_backoff(*_args, **_kwargs):
+        called["publish"] = True
+        return {}
+
+    monkeypatch.setattr(publish_workflow, "_watch_publish_url", lambda *_args, **_kwargs: asyncio.Future(), raising=True)
+    monkeypatch.setattr(publish_workflow, "_clear_caption_input", _fake_clear_caption, raising=True)
+    monkeypatch.setattr(
+        publish_workflow,
+        "_fetch_publish_result_from_posts",
+        _fake_fetch_publish_result,
+        raising=True,
+    )
+    monkeypatch.setattr(
+        publish_workflow,
+        "_publish_sora_post_with_backoff",
+        _fake_publish_with_backoff,
+        raising=True,
+    )
+
+    result = await publish_workflow._publish_sora_from_page(  # noqa: SLF001
+        page=page,
+        task_id="task_x",
+        prompt="prompt_x",
+        generation_id="gen_x",
+    )
+
+    assert result == "https://sora.chatgpt.com/p/s_12345678"
+    assert called["publish"] is False
 
 
 @pytest.mark.asyncio

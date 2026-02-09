@@ -145,6 +145,8 @@ class IXBrowserGenerateJob(BaseModel):
     progress: Optional[int] = None
     publish_status: Optional[str] = None
     publish_url: Optional[str] = None
+    publish_post_id: Optional[str] = None
+    publish_permalink: Optional[str] = None
     publish_error: Optional[str] = None
     publish_attempts: Optional[int] = None
     published_at: Optional[str] = None
@@ -219,6 +221,8 @@ class SoraJob(BaseModel):
     task_id: Optional[str] = None
     generation_id: Optional[str] = None
     publish_url: Optional[str] = None
+    publish_post_id: Optional[str] = None
+    publish_permalink: Optional[str] = None
     watermark_status: Optional[str] = None
     watermark_url: Optional[str] = None
     watermark_error: Optional[str] = None

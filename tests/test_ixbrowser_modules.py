@@ -82,3 +82,71 @@ async def test_sora_job_runner_delegates_watermark_parse(monkeypatch):
 
     url = await runner.run_sora_watermark(job_id=1, publish_url="https://sora.chatgpt.com/p/s_1234abcd")
     assert url == "http://example.com/wm.mp4"
+
+
+@pytest.mark.asyncio
+async def test_sora_job_runner_watermark_retry_fallback_on_failure(monkeypatch):
+    service = IXBrowserService()
+    runner = service._sora_job_runner  # noqa: SLF001
+
+    monkeypatch.setattr(
+        "app.services.ixbrowser.sora_job_runner.sqlite_db.get_watermark_free_config",
+        lambda: {"fallback_on_failure": True},
+    )
+
+    async def _fake_run_sora_watermark(*_args, **_kwargs):
+        raise RuntimeError("解析失败")
+
+    monkeypatch.setattr(runner, "run_sora_watermark", _fake_run_sora_watermark)
+
+    patched = {}
+    events = []
+    monkeypatch.setattr(
+        "app.services.ixbrowser.sora_job_runner.sqlite_db.update_sora_job",
+        lambda _job_id, payload: patched.update(payload) or True,
+    )
+    monkeypatch.setattr(
+        "app.services.ixbrowser.sora_job_runner.sqlite_db.create_sora_job_event",
+        lambda _job_id, phase, event, message=None: events.append((phase, event, message)) or 1,
+    )
+
+    await runner.run_sora_watermark_retry(job_id=7, publish_url="https://sora.chatgpt.com/p/s_1234abcd")
+
+    assert patched["status"] == "completed"
+    assert patched["phase"] == "done"
+    assert patched["watermark_status"] == "fallback"
+    assert patched["watermark_url"] == "https://sora.chatgpt.com/p/s_1234abcd"
+    assert any(item[1] == "fallback" for item in events)
+
+
+@pytest.mark.asyncio
+async def test_sora_job_runner_watermark_retry_fallback_disabled(monkeypatch):
+    service = IXBrowserService()
+    runner = service._sora_job_runner  # noqa: SLF001
+
+    monkeypatch.setattr(
+        "app.services.ixbrowser.sora_job_runner.sqlite_db.get_watermark_free_config",
+        lambda: {"fallback_on_failure": False},
+    )
+
+    async def _fake_run_sora_watermark(*_args, **_kwargs):
+        raise RuntimeError("解析失败")
+
+    monkeypatch.setattr(runner, "run_sora_watermark", _fake_run_sora_watermark)
+
+    patched = {}
+    events = []
+    monkeypatch.setattr(
+        "app.services.ixbrowser.sora_job_runner.sqlite_db.update_sora_job",
+        lambda _job_id, payload: patched.update(payload) or True,
+    )
+    monkeypatch.setattr(
+        "app.services.ixbrowser.sora_job_runner.sqlite_db.create_sora_job_event",
+        lambda _job_id, phase, event, message=None: events.append((phase, event, message)) or 1,
+    )
+
+    await runner.run_sora_watermark_retry(job_id=8, publish_url="https://sora.chatgpt.com/p/s_1234abcd")
+
+    assert patched["status"] == "failed"
+    assert patched["phase"] == "watermark"
+    assert any(item[1] == "fail" for item in events)

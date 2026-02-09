@@ -81,6 +81,8 @@ def test_admin_watermark_settings_get_and_put(client):
     payload = get_resp.json()
     assert "enabled" in payload
     assert "parse_method" in payload
+    assert payload["fallback_on_failure"] is True
+    assert payload["auto_delete_published_post"] is False
 
     put_resp = client.put(
         "/api/v1/admin/settings/watermark-free",
@@ -91,10 +93,13 @@ def test_admin_watermark_settings_get_and_put(client):
             "custom_parse_token": "abc",
             "custom_parse_path": "/get-sora-link",
             "retry_max": 3,
+            "fallback_on_failure": False,
+            "auto_delete_published_post": True,
         },
     )
     assert put_resp.status_code == 200
     updated = put_resp.json()
     assert updated["custom_parse_url"] == "http://127.0.0.1:18080"
     assert int(updated["retry_max"]) == 3
-
+    assert updated["fallback_on_failure"] is False
+    assert updated["auto_delete_published_post"] is True

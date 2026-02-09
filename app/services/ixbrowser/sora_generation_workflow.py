@@ -31,6 +31,12 @@ class SoraGenerationWorkflow:
 
     def _connection_error(self, message: str) -> Exception:
         return self._connection_error_cls(message)
+
+    def _persist_generation_id(self, job_id: int, generation_id: str) -> None:
+        if sqlite_db.get_sora_job(job_id):
+            sqlite_db.update_sora_job(job_id, {"generation_id": generation_id})
+            return
+        sqlite_db.update_ixbrowser_generate_job(job_id, {"generation_id": generation_id})
     async def run_sora_submit_and_progress(
         self,
         job_id: int,
@@ -409,11 +415,17 @@ class SoraGenerationWorkflow:
             status = "completed" if final.get("status") == "completed" else "failed"
             publish_url = final.get("publish_url")
             publish_error = final.get("publish_error")
+            publish_post_id = final.get("publish_post_id")
+            publish_permalink = final.get("publish_permalink")
+            if not publish_post_id and publish_url:
+                publish_post_id = self._service._sora_job_runner.extract_share_id_from_url(str(publish_url))  # noqa: SLF001
             publish_patch: Dict[str, Any] = {}
             if publish_url:
                 publish_patch = {
                     "publish_status": "completed",
                     "publish_url": publish_url,
+                    "publish_post_id": publish_post_id,
+                    "publish_permalink": publish_permalink or publish_url,
                     "publish_error": None,
                     "published_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
@@ -656,6 +668,8 @@ class SoraGenerationWorkflow:
                     if state.get("state") == "completed":
                         publish_url = None
                         publish_error = None
+                        publish_post_id = None
+                        publish_permalink = None
                         try:
                             if use_proxy_poll:
                                 publish_url = await self._service._sora_publish_workflow._publish_sora_video(
@@ -674,6 +688,9 @@ class SoraGenerationWorkflow:
                                     created_after=created_after,
                                     generation_id=generation_id,
                                 )
+                            if publish_url and self._service._sora_publish_workflow.is_valid_publish_url(publish_url):
+                                publish_post_id = self._service._sora_job_runner.extract_share_id_from_url(str(publish_url))  # noqa: SLF001
+                                publish_permalink = publish_url
                         except Exception as publish_exc:  # noqa: BLE001
                             publish_error = str(publish_exc)
                         return {
@@ -685,6 +702,8 @@ class SoraGenerationWorkflow:
                             "poll_attempts": poll_attempts,
                             "progress": 100,
                             "publish_url": publish_url,
+                            "publish_post_id": publish_post_id,
+                            "publish_permalink": publish_permalink,
                             "publish_error": publish_error,
                             "generation_id": generation_id,
                         }
@@ -784,11 +803,14 @@ class SoraGenerationWorkflow:
                     generation_id=row.get("generation_id"),
                 )
                 if publish_url:
+                    publish_post_id = self._service._sora_job_runner.extract_share_id_from_url(str(publish_url))  # noqa: SLF001
                     sqlite_db.update_ixbrowser_generate_job(
                         job_id,
                         {
                             "publish_status": "completed",
                             "publish_url": publish_url,
+                            "publish_post_id": publish_post_id,
+                            "publish_permalink": publish_url,
                             "published_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         }
                     )
@@ -989,13 +1011,7 @@ class SoraGenerationWorkflow:
                     if isinstance(draft_data, dict):
                         generation_id = self._service._sora_publish_workflow._extract_generation_id(draft_data)
                         if generation_id:
-                            if sqlite_db.get_sora_job(job_id):
-                                sqlite_db.update_sora_job(job_id, {"generation_id": generation_id})
-                            else:
-                                sqlite_db.update_ixbrowser_generate_job(
-                                    job_id,
-                                    {"generation_id": generation_id},
-                                )
+                            self._persist_generation_id(job_id, generation_id)
                             logger.info(
                                 "获取 genid 成功(监听): profile=%s task_id=%s generation_id=%s",
                                 profile_id,
@@ -1008,23 +1024,15 @@ class SoraGenerationWorkflow:
                         last_manual_fetch = now
                         logger.info("获取 genid 手动 fetch drafts: profile=%s task_id=%s", profile_id, task_id)
                         try:
-                            manual_data = None
-                            if page and (page.url or "").startswith("https://sora.chatgpt.com"):
-                                manual_data = await self._service._sora_publish_workflow._fetch_draft_item_by_task_id(
-                                    page=page,
-                                    task_id=task_id,
-                                    limit=100,
-                                    max_pages=12,
-                                    retries=2,
-                                    delay_ms=1200,
-                                )
-                            if manual_data is None and context is not None:
-                                manual_data = await self._service._sora_publish_workflow._fetch_draft_item_by_task_id_via_context(
-                                    context=context,
-                                    task_id=task_id,
-                                    limit=100,
-                                    max_pages=12,
-                                )
+                            generation_id, manual_data = await self._service._sora_publish_workflow._resolve_generation_id_by_task_id(  # noqa: SLF001
+                                task_id=task_id,
+                                page=page if page and (page.url or "").startswith("https://sora.chatgpt.com") else None,
+                                context=context,
+                                limit=100,
+                                max_pages=12,
+                                retries=2,
+                                delay_ms=1200,
+                            )
                         except Exception as fetch_exc:  # noqa: BLE001
                             if self._is_execution_context_destroyed(fetch_exc):
                                 logger.info(
@@ -1037,24 +1045,17 @@ class SoraGenerationWorkflow:
                             if self._is_page_closed_error(fetch_exc):
                                 await _disconnect_browser()
                                 continue
+                            generation_id = None
                             manual_data = None
-                        if isinstance(manual_data, dict):
-                            generation_id = self._service._sora_publish_workflow._extract_generation_id(manual_data)
-                            if generation_id:
-                                if sqlite_db.get_sora_job(job_id):
-                                    sqlite_db.update_sora_job(job_id, {"generation_id": generation_id})
-                                else:
-                                    sqlite_db.update_ixbrowser_generate_job(
-                                        job_id,
-                                        {"generation_id": generation_id},
-                                    )
-                                logger.info(
-                                    "获取 genid 成功(直取): profile=%s task_id=%s generation_id=%s",
-                                    profile_id,
-                                    task_id,
-                                    generation_id,
-                                )
-                                return generation_id
+                        if generation_id:
+                            self._persist_generation_id(job_id, generation_id)
+                            logger.info(
+                                "获取 genid 成功(直取): profile=%s task_id=%s generation_id=%s",
+                                profile_id,
+                                task_id,
+                                generation_id,
+                            )
+                            return generation_id
                         logger.info("获取 genid 手动 fetch 未命中: profile=%s task_id=%s", profile_id, task_id)
 
                     await asyncio.sleep(2.0)

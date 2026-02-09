@@ -2520,6 +2520,8 @@ class IXBrowserService:
                 "publish_status": "queued",
                 "publish_error": None,
                 "publish_url": None if not self._sora_publish_workflow.is_valid_publish_url(row.get("publish_url")) else row.get("publish_url"),
+                "publish_post_id": None,
+                "publish_permalink": None,
             }
         )
 
@@ -3088,6 +3090,8 @@ class IXBrowserService:
             task_id=row.get("task_id"),
             generation_id=row.get("generation_id"),
             publish_url=publish_url,
+            publish_post_id=row.get("publish_post_id"),
+            publish_permalink=row.get("publish_permalink"),
             watermark_status=row.get("watermark_status"),
             watermark_url=row.get("watermark_url"),
             watermark_error=row.get("watermark_error"),
@@ -3136,6 +3140,8 @@ class IXBrowserService:
             progress=progress,
             publish_status=row.get("publish_status"),
             publish_url=publish_url,
+            publish_post_id=row.get("publish_post_id"),
+            publish_permalink=row.get("publish_permalink"),
             publish_error=row.get("publish_error"),
             publish_attempts=row.get("publish_attempts"),
             published_at=row.get("published_at"),
@@ -3317,19 +3323,6 @@ class IXBrowserService:
             return False
         lower = message.lower()
         return "heavy load" in lower or "under heavy load" in lower or "heavy_load" in lower
-
-    def _is_sora_publish_not_ready_error(self, text: str) -> bool:
-        message = str(text or "").strip()
-        if not message:
-            return False
-        lower = message.lower()
-        if "invalid_request_error" in lower:
-            return True
-        if "\"code\": \"invalid_request\"" in lower:
-            return True
-        if "\"code\":\"invalid_request\"" in lower:
-            return True
-        return False
 
     def get_latest_sora_scan(
         self,

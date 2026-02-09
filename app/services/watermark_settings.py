@@ -15,6 +15,8 @@ def _row_to_settings(row: Dict) -> WatermarkFreeSettings:
         "custom_parse_token": row.get("custom_parse_token"),
         "custom_parse_path": row.get("custom_parse_path") or "/get-sora-link",
         "retry_max": int(row.get("retry_max") or 0),
+        "fallback_on_failure": bool(row.get("fallback_on_failure", True)),
+        "auto_delete_published_post": bool(row.get("auto_delete_published_post", False)),
     }
     return WatermarkFreeSettings.model_validate(data)
 
@@ -35,6 +37,8 @@ def update_watermark_free_settings(payload: WatermarkFreeSettings) -> WatermarkF
         "custom_parse_token": data.get("custom_parse_token"),
         "custom_parse_path": data.get("custom_parse_path"),
         "retry_max": int(data.get("retry_max") or 0),
+        "fallback_on_failure": 1 if data.get("fallback_on_failure", True) else 0,
+        "auto_delete_published_post": 1 if data.get("auto_delete_published_post", False) else 0,
     }
     sqlite_db.update_watermark_free_config(db_payload)
     return get_watermark_free_settings()

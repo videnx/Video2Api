@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -108,10 +109,14 @@ class SoraJobRunner:
                     )
                     if not publish_url:
                         raise self._service_error("发布未返回链接")
+                    publish_permalink = self._normalize_publish_permalink(publish_url)
+                    publish_post_id = self.extract_share_id_from_url(publish_url)
                     self._db.update_sora_job(
                         job_id,
                         {
                             "publish_url": publish_url,
+                            "publish_post_id": publish_post_id,
+                            "publish_permalink": publish_permalink,
                             "status": "running",
                             "phase": "watermark",
                             "progress_pct": 90,
@@ -121,7 +126,18 @@ class SoraJobRunner:
                     )
                     self._db.create_sora_job_event(job_id, "publish", "finish", "发布完成")
 
-                    watermark_url = await self.run_sora_watermark(job_id=job_id, publish_url=publish_url)
+                    try:
+                        watermark_url = await self.run_sora_watermark(job_id=job_id, publish_url=publish_url)
+                    except Exception as watermark_exc:  # noqa: BLE001
+                        config = self._db.get_watermark_free_config() or {}
+                        if self._is_fallback_enabled(config) and self._is_watermark_fallback_candidate(str(watermark_exc)):
+                            self.complete_sora_job_with_publish_fallback(
+                                job_id=job_id,
+                                publish_url=publish_url,
+                                reason=str(watermark_exc),
+                            )
+                            return
+                        raise
                     self.complete_sora_job_after_watermark(job_id=job_id, watermark_url=watermark_url)
                     return
 
@@ -171,6 +187,24 @@ class SoraJobRunner:
         )
         self._db.create_sora_job_event(job_id, "watermark", "finish", "去水印完成")
 
+    def complete_sora_job_with_publish_fallback(self, job_id: int, publish_url: str, reason: str) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._db.update_sora_job(
+            job_id,
+            {
+                "watermark_url": publish_url,
+                "watermark_status": "fallback",
+                "watermark_error": reason,
+                "watermark_finished_at": now,
+                "status": "completed",
+                "phase": "done",
+                "progress_pct": 100,
+                "error": None,
+                "finished_at": now,
+            },
+        )
+        self._db.create_sora_job_event(job_id, "watermark", "fallback", f"去水印失败，回退分享链接: {reason}")
+
     def is_sora_job_canceled(self, job_id: int) -> bool:
         row = self._db.get_sora_job(job_id)
         return bool(row and str(row.get("status") or "") == "canceled")
@@ -180,6 +214,10 @@ class SoraJobRunner:
             watermark_url = await self.run_sora_watermark(job_id=job_id, publish_url=publish_url)
             self.complete_sora_job_after_watermark(job_id=job_id, watermark_url=watermark_url)
         except Exception as exc:  # noqa: BLE001
+            config = self._db.get_watermark_free_config() or {}
+            if self._is_fallback_enabled(config) and self._is_watermark_fallback_candidate(str(exc)):
+                self.complete_sora_job_with_publish_fallback(job_id=job_id, publish_url=publish_url, reason=str(exc))
+                return
             failed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._db.update_sora_job(
                 job_id,
@@ -191,6 +229,34 @@ class SoraJobRunner:
                 },
             )
             self._db.create_sora_job_event(job_id, "watermark", "fail", str(exc))
+
+    @staticmethod
+    def _is_fallback_enabled(config: Dict[str, Any]) -> bool:
+        return bool(config.get("fallback_on_failure", True))
+
+    @staticmethod
+    def _is_watermark_fallback_candidate(error_text: str) -> bool:
+        lowered = str(error_text or "").strip().lower()
+        if not lowered:
+            return True
+        return "去水印功能已关闭" not in lowered
+
+    @staticmethod
+    def _normalize_publish_permalink(publish_url: str) -> Optional[str]:
+        text = str(publish_url or "").strip()
+        if not text:
+            return None
+        if text.startswith("/p/"):
+            return f"https://sora.chatgpt.com{text}"
+        if re.fullmatch(r"s_[a-zA-Z0-9]{8,}", text):
+            return f"https://sora.chatgpt.com/p/{text}"
+        try:
+            parsed = urlparse(text)
+        except Exception:  # noqa: BLE001
+            return None
+        if parsed.scheme in {"http", "https"} and parsed.netloc == "sora.chatgpt.com" and parsed.path.startswith("/p/"):
+            return f"https://sora.chatgpt.com{parsed.path}"
+        return None
 
     async def run_sora_watermark(self, job_id: int, publish_url: str) -> str:
         config = self._db.get_watermark_free_config() or {}
