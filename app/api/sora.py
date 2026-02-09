@@ -51,6 +51,7 @@ async def create_sora_job(
                 "group_title": request.group_title,
                 "duration": request.duration,
                 "aspect_ratio": request.aspect_ratio,
+                "has_image": bool(str(request.image_url or "").strip()),
                 "dispatch_mode": result.job.dispatch_mode,
                 "dispatch_score": result.job.dispatch_score,
                 "dispatch_reason": result.job.dispatch_reason,

@@ -142,3 +142,36 @@ async def cancel_nurture_batch(
             resource_id=str(batch_id),
         )
         raise
+
+
+@router.post("/batches/{batch_id}/retry", response_model=SoraNurtureBatch)
+async def retry_nurture_batch(
+    batch_id: int,
+    request: Request,
+    current_user: dict = Depends(get_current_active_user),
+):
+    try:
+        result = await sora_nurture_service.retry_batch_failed_jobs(batch_id)
+        log_audit(
+            request=request,
+            current_user=current_user,
+            action="nurture.batch.retry",
+            status="success",
+            message="重试养号任务组失败任务",
+            resource_type="batch",
+            resource_id=str(batch_id),
+            extra={"retry_scope": "failed_only"},
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        log_audit(
+            request=request,
+            current_user=current_user,
+            action="nurture.batch.retry",
+            status="failed",
+            level="WARN",
+            message=str(exc),
+            resource_type="batch",
+            resource_id=str(batch_id),
+        )
+        raise

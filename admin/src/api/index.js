@@ -324,3 +324,8 @@ export const cancelNurtureBatch = async (batchId) => {
   const response = await api.post(`/nurture/batches/${batchId}/cancel`)
   return response.data
 }
+
+export const retryNurtureBatch = async (batchId) => {
+  const response = await api.post(`/nurture/batches/${batchId}/retry`)
+  return response.data
+}

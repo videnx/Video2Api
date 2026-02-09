@@ -100,13 +100,14 @@ def _seed_user_token(username="stream-user") -> str:
     return create_access_token({"sub": username})
 
 
-def _seed_job(*, status="running", phase="progress", progress_pct=10.0, group_title="Sora") -> int:
+def _seed_job(*, status="running", phase="progress", progress_pct=10.0, group_title="Sora", image_url=None) -> int:
     return sqlite_db.create_sora_job(
         {
             "profile_id": 1,
             "window_name": "w1",
             "group_title": group_title,
             "prompt": "test",
+            "image_url": image_url,
             "duration": "10s",
             "aspect_ratio": "landscape",
             "status": status,
@@ -141,6 +142,23 @@ async def test_sora_job_stream_first_event_is_snapshot():
         assert isinstance(data.get("jobs"), list)
         assert data.get("server_time")
         assert any(int(item.get("job_id") or 0) == int(job_id) for item in data.get("jobs", []))
+    finally:
+        await resp.body_iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sora_job_stream_snapshot_contains_image_url():
+    token = _seed_user_token()
+    job_id = _seed_job(image_url="https://example.com/snapshot.png")
+
+    resp = await _open_stream(token=token)
+    try:
+        event_name, payload = await _next_event(resp, expected={"snapshot"})
+        assert event_name == "snapshot"
+        data = json.loads(payload or "{}")
+        matched = next((item for item in data.get("jobs", []) if int(item.get("job_id") or 0) == int(job_id)), None)
+        assert matched is not None
+        assert matched.get("image_url") == "https://example.com/snapshot.png"
     finally:
         await resp.body_iterator.aclose()
 

@@ -33,6 +33,10 @@ POST_DIALOG_SELECTOR = '[role="dialog"]'
 POST_LIKE_HEART_D_PREFIX_OUTLINE = "M9 3.991"
 POST_LIKE_HEART_D_PREFIX_FILLED = "M9.48 16.252"
 
+NURTURE_JOB_TIMEOUT_SECONDS = 480
+NURTURE_SESSION_CHECK_TIMEOUT_MS = 12_000
+NURTURE_DIALOG_RECOVER_MAX_RETRIES = 3
+
 
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -66,6 +70,9 @@ class SoraNurtureService:
         self._batch_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
         self._tasks: Dict[int, asyncio.Task] = {}
         self._tasks_lock = asyncio.Lock()
+        self._job_timeout_seconds = int(NURTURE_JOB_TIMEOUT_SECONDS)
+        self._session_check_timeout_ms = int(NURTURE_SESSION_CHECK_TIMEOUT_MS)
+        self._dialog_recover_max_retries = int(NURTURE_DIALOG_RECOVER_MAX_RETRIES)
 
     def _find_group_by_title(self, groups: List[Any], group_title: str) -> Any:
         normalized = str(group_title or "").strip().lower()
@@ -241,6 +248,60 @@ class SoraNurtureService:
         updated = self._db.get_sora_nurture_batch(int(batch_id)) or row
         return self._normalize_batch_row(updated)
 
+    async def retry_batch_failed_jobs(self, batch_id: int) -> dict:
+        row = self._db.get_sora_nurture_batch(int(batch_id))
+        if not row:
+            raise IXBrowserNotFoundError(f"未找到养号任务组：{batch_id}")
+
+        status = str(row.get("status") or "").strip().lower()
+        if status in {"queued", "running"}:
+            raise SoraNurtureServiceError("任务组正在执行，无法重试")
+
+        jobs = self._db.list_sora_nurture_jobs(batch_id=int(batch_id), limit=5000)
+        failed_jobs = [job for job in jobs if str(job.get("status") or "").strip().lower() == "failed"]
+        if not failed_jobs:
+            raise SoraNurtureServiceError("当前任务组没有可重试的失败任务")
+
+        for job in failed_jobs:
+            self._db.update_sora_nurture_job(
+                int(job.get("id") or 0),
+                {
+                    "status": "queued",
+                    "phase": "queue",
+                    "scroll_done": 0,
+                    "like_count": 0,
+                    "follow_count": 0,
+                    "error": None,
+                    "started_at": None,
+                    "finished_at": None,
+                },
+            )
+
+        stats = self._calc_batch_stats(int(batch_id))
+        self._db.update_sora_nurture_batch(
+            int(batch_id),
+            {
+                "status": "queued",
+                "success_count": int(stats["success_count"]),
+                "failed_count": int(stats["failed_count"]),
+                "canceled_count": int(stats["canceled_count"]),
+                "like_total": int(stats["like_total"]),
+                "follow_total": int(stats["follow_total"]),
+                "lease_owner": None,
+                "lease_until": None,
+                "heartbeat_at": None,
+                "run_last_error": None,
+                "error": None,
+                "started_at": None,
+                "finished_at": None,
+            },
+        )
+
+        updated = self._db.get_sora_nurture_batch(int(batch_id))
+        if not updated:
+            raise SoraNurtureServiceError("重试失败：任务组状态更新异常")
+        return self._normalize_batch_row(updated)
+
     async def run_batch(self, batch_id: int) -> None:
         batch_id = int(batch_id)
         async with self._tasks_lock:
@@ -359,17 +420,20 @@ class SoraNurtureService:
                             continue
 
                         try:
-                            job_result = await self._run_single_job(
-                                playwright=playwright,
-                                batch_id=batch_id,
-                                job_id=job_id,
-                                profile_id=profile_id,
-                                group_title=job_group_title,
-                                scroll_target=scroll_count,
-                                like_probability=like_probability,
-                                follow_probability=follow_probability,
-                                max_follows=max_follows,
-                                max_likes=max_likes,
+                            job_result = await asyncio.wait_for(
+                                self._run_single_job(
+                                    playwright=playwright,
+                                    batch_id=batch_id,
+                                    job_id=job_id,
+                                    profile_id=profile_id,
+                                    group_title=job_group_title,
+                                    scroll_target=scroll_count,
+                                    like_probability=like_probability,
+                                    follow_probability=follow_probability,
+                                    max_follows=max_follows,
+                                    max_likes=max_likes,
+                                ),
+                                timeout=max(1, int(self._job_timeout_seconds)),
                             )
                             status = job_result.get("status")
                             like_total += int(job_result.get("like_count") or 0)
@@ -381,6 +445,19 @@ class SoraNurtureService:
                             else:
                                 failed_count += 1
                                 first_error = first_error or str(job_result.get("error") or "unknown error")
+                        except asyncio.TimeoutError:
+                            failed_count += 1
+                            timeout_error = f"执行超时：超过 {max(1, int(self._job_timeout_seconds))} 秒"
+                            first_error = first_error or timeout_error
+                            self._db.update_sora_nurture_job(
+                                int(job_id),
+                                {
+                                    "status": "failed",
+                                    "phase": "done",
+                                    "error": timeout_error,
+                                    "finished_at": _now_str(),
+                                },
+                            )
                         except Exception as exc:  # noqa: BLE001
                             failed_count += 1
                             first_error = first_error or str(exc)
@@ -618,20 +695,34 @@ class SoraNurtureService:
     async def _check_logged_in(self, page) -> Tuple[bool, str]:
         data = await page.evaluate(
             """
-            async () => {
-              const resp = await fetch("https://sora.chatgpt.com/api/auth/session", {
-                method: "GET",
-                credentials: "include"
-              });
-              const text = await resp.text();
-              let parsed = null;
-              try { parsed = JSON.parse(text); } catch (e) {}
-              return { status: resp.status, raw: text, json: parsed };
+            async ({ timeoutMs }) => {
+              const controller = new AbortController();
+              const timer = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+              try {
+                const resp = await fetch("https://sora.chatgpt.com/api/auth/session", {
+                  method: "GET",
+                  credentials: "include",
+                  signal: controller.signal
+                });
+                const text = await resp.text();
+                let parsed = null;
+                try { parsed = JSON.parse(text); } catch (e) {}
+                return { status: resp.status, raw: text, json: parsed, timeout: false };
+              } catch (e) {
+                const name = e && e.name ? String(e.name) : "";
+                const message = e && e.message ? String(e.message) : String(e || "");
+                return { status: null, raw: message, json: null, timeout: name === "AbortError" };
+              } finally {
+                window.clearTimeout(timer);
+              }
             }
-            """
+            """,
+            {"timeoutMs": max(1_000, int(self._session_check_timeout_ms))},
         )
         if not isinstance(data, dict):
             return False, "session 返回格式异常"
+        if bool(data.get("timeout")):
+            return False, f"session 检查超时（{max(1_000, int(self._session_check_timeout_ms))}ms）"
         status = data.get("status")
         raw = data.get("raw")
         if status == 200:
@@ -657,6 +748,7 @@ class SoraNurtureService:
         follow_count = 0
         scroll_done = 0
         canceled = False
+        recover_failures = 0
 
         # 进入 /p/... 弹窗（dialog）后，按 ArrowDown 切换作品；刷满 scroll_target 条后退出。
         await self._ensure_in_post_dialog(page)
@@ -707,13 +799,17 @@ class SoraNurtureService:
                 try:
                     await self._goto_next_post(page, prev_url=prev)
                     await page.wait_for_timeout(random.randint(700, 1300))
+                    recover_failures = 0
                 except Exception:  # noqa: BLE001
-                    # 若页面状态异常，尝试回到 explore 重新打开弹窗继续
-                    try:
-                        await page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=40_000)
-                        await self._ensure_in_post_dialog(page)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    recovered = await self._try_recover_post_dialog(page)
+                    if recovered:
+                        recover_failures = 0
+                    else:
+                        recover_failures += 1
+                        if recover_failures >= max(1, int(self._dialog_recover_max_retries)):
+                            raise SoraNurtureServiceError(
+                                f"页面恢复失败次数过多（{recover_failures} 次），终止当前账号"
+                            )
 
         # 退出弹窗回 Explore（失败也不影响任务完成）
         try:
@@ -723,6 +819,14 @@ class SoraNurtureService:
             pass
 
         return like_count, follow_count, scroll_done, canceled
+
+    async def _try_recover_post_dialog(self, page) -> bool:
+        try:
+            await page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=40_000)
+            await self._ensure_in_post_dialog(page)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _ensure_in_post_dialog(self, page, timeout_ms: int = 70_000) -> None:
         """
@@ -833,6 +937,7 @@ class SoraNurtureService:
         """
         mark = await self._mark_post_like_button(page)
         if not isinstance(mark, dict) or not mark.get("ok"):
+            logger.info("养号点赞定位失败: %s", mark)
             return False
         return await self._click_post_like_if_needed(page)
 
@@ -853,27 +958,60 @@ class SoraNurtureService:
               const vw = window.innerWidth, vh = window.innerHeight;
               const inView = (r) => r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
 
-              function collectCandidates(card) {
+              function collectCandidates(root) {
                 const out = [];
-                for (const btn of Array.from(card.querySelectorAll('button'))) {
+                for (const btn of Array.from(root.querySelectorAll('button'))) {
                   const txt = (btn.innerText || '').trim().replace(/\\s+/g, ' ');
-                  if (!txt || !/^[0-9][0-9.,KkMm]*$/.test(txt)) continue;
                   const svg = btn.querySelector('svg');
                   if (!svg) continue;
                   const path = svg.querySelector('path');
+                  if (!path) continue;
                   const r = btn.getBoundingClientRect();
                   if (!inView(r) || r.width < 18 || r.height < 18) continue;
-                  const d = path ? (path.getAttribute('d') || '') : '';
+                  const aria = (btn.getAttribute('aria-label') || '').trim();
+                  const d = (path.getAttribute('d') || '');
+                  if (!txt || !/^[0-9][0-9.,KkMm]*$/.test(txt)) {
+                    if (!d.startsWith(outlinePrefix) && !d.startsWith(filledPrefix)) continue;
+                  }
                   out.push({
                     btn,
                     txt,
+                    aria,
                     x: r.x,
+                    y: r.y,
                     d,
-                    fill: path ? (path.getAttribute('fill') || '') : '',
-                    stroke: path ? (path.getAttribute('stroke') || '') : '',
+                    fill: (path.getAttribute('fill') || ''),
+                    stroke: (path.getAttribute('stroke') || ''),
                   });
                 }
                 return out;
+              }
+
+              function findLikeByHeartPrefix(root) {
+                const paths = Array.from(root.querySelectorAll('button svg path'));
+                for (const path of paths) {
+                  const d = (path.getAttribute('d') || '');
+                  if (!d) continue;
+                  if (!d.startsWith(outlinePrefix) && !d.startsWith(filledPrefix)) continue;
+                  const btn = path.closest('button');
+                  if (!btn) continue;
+                  const r = btn.getBoundingClientRect();
+                  if (!inView(r) || r.width < 18 || r.height < 18) continue;
+                  const txt = (btn.innerText || '').trim().replace(/\\s+/g, ' ');
+                  const aria = (btn.getAttribute('aria-label') || '').trim();
+                  return {
+                    btn,
+                    txt,
+                    aria,
+                    x: r.x,
+                    y: r.y,
+                    d,
+                    fill: (path.getAttribute('fill') || ''),
+                    stroke: (path.getAttribute('stroke') || ''),
+                    strategy: 'heart_prefix',
+                  };
+                }
+                return null;
               }
 
               function findFollowCard() {
@@ -897,7 +1035,10 @@ class SoraNurtureService:
                 if (cards.length >= 10) break;
               }
 
-              let best = null;
+              // Strategy 1: 在整个 dialog 内直接按心形 path 前缀定位（最稳定）
+              let best = findLikeByHeartPrefix(dialog);
+
+              // Strategy 2: 若未命中，再在可能的卡片区域内找候选
               for (const card of cards) {
                 const cands = collectCandidates(card);
                 if (!cands.length) continue;
@@ -909,9 +1050,23 @@ class SoraNurtureService:
                 best = best || cands[0];
               }
 
-              if (!best) return { ok: false, reason: 'no candidates' };
+              if (!best) {
+                const sample = collectCandidates(dialog)
+                  .slice(0, 8)
+                  .map(c => ({ aria: c.aria, txt: c.txt, d: (c.d || '').slice(0, 32), x: Math.round(c.x), y: Math.round(c.y) }));
+                return { ok: false, reason: 'no candidates', sample };
+              }
               best.btn.setAttribute('data-nurture-post-like', '1');
-              return { ok: true, picked: { txt: best.txt, d: (best.d || '').slice(0, 40), fill: best.fill, stroke: best.stroke } };
+              return {
+                ok: true,
+                picked: {
+                  txt: best.txt,
+                  aria: best.aria,
+                  d: (best.d || '').slice(0, 40),
+                  fill: best.fill,
+                  stroke: best.stroke,
+                },
+              };
             }
             """,
             {

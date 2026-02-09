@@ -369,6 +369,7 @@ class SQLiteDB:
                 window_name TEXT,
                 group_title TEXT,
                 prompt TEXT NOT NULL,
+                image_url TEXT,
                 duration TEXT NOT NULL,
                 aspect_ratio TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -408,6 +409,10 @@ class SQLiteDB:
 
         cursor.execute("PRAGMA table_info(sora_jobs)")
         columns = {row["name"] for row in cursor.fetchall()}
+        if "image_url" not in columns:
+            cursor.execute(
+                "ALTER TABLE sora_jobs ADD COLUMN image_url TEXT"
+            )
         if "watermark_status" not in columns:
             cursor.execute(
                 "ALTER TABLE sora_jobs ADD COLUMN watermark_status TEXT"
@@ -1358,19 +1363,20 @@ class SQLiteDB:
         cursor.execute(
             '''
             INSERT INTO sora_jobs (
-                profile_id, window_name, group_title, prompt, duration, aspect_ratio,
+                profile_id, window_name, group_title, prompt, image_url, duration, aspect_ratio,
                 status, phase, progress_pct, task_id, generation_id, publish_url,
                 dispatch_mode, dispatch_score, dispatch_quantity_score, dispatch_quality_score, dispatch_reason,
                 retry_of_job_id, retry_root_job_id, retry_index,
                 error,
                 started_at, finished_at, operator_user_id, operator_username, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 int(data.get("profile_id") or 0),
                 data.get("window_name"),
                 data.get("group_title"),
                 str(data.get("prompt") or ""),
+                data.get("image_url"),
                 str(data.get("duration") or "10s"),
                 str(data.get("aspect_ratio") or "landscape"),
                 str(data.get("status") or "queued"),
@@ -1410,6 +1416,7 @@ class SQLiteDB:
             "window_name",
             "group_title",
             "prompt",
+            "image_url",
             "duration",
             "aspect_ratio",
             "status",
@@ -1563,11 +1570,11 @@ class SQLiteDB:
             conditions.append(
                 "("
                 "prompt LIKE ? OR task_id LIKE ? OR generation_id LIKE ? OR "
-                "publish_url LIKE ? OR watermark_url LIKE ? OR "
+                "publish_url LIKE ? OR watermark_url LIKE ? OR image_url LIKE ? OR "
                 "dispatch_reason LIKE ? OR error LIKE ? OR watermark_error LIKE ?"
                 ")"
             )
-            params.extend([like, like, like, like, like, like, like, like])
+            params.extend([like, like, like, like, like, like, like, like, like])
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"SELECT * FROM sora_jobs {where_clause} ORDER BY id DESC LIMIT ?"
@@ -1909,8 +1916,7 @@ class SQLiteDB:
             SELECT id
             FROM sora_nurture_batches
             WHERE status = 'running'
-              AND lease_until IS NOT NULL
-              AND lease_until < ?
+              AND (lease_until IS NULL OR lease_until < ?)
             ''',
             (now,),
         )
@@ -1929,7 +1935,7 @@ class SQLiteDB:
                 lease_owner = NULL,
                 lease_until = NULL,
                 heartbeat_at = NULL,
-                run_last_error = COALESCE(run_last_error, 'worker lease expired')
+                run_last_error = 'startup recovered stale running batch'
             WHERE id IN ({placeholders})
             ''',
             batch_ids,
@@ -1940,7 +1946,7 @@ class SQLiteDB:
             UPDATE sora_nurture_jobs
             SET status = 'queued',
                 phase = 'queue',
-                error = COALESCE(error, 'worker lease expired')
+                error = COALESCE(error, 'startup recovered stale running batch')
             WHERE batch_id IN ({placeholders})
               AND status = 'running'
             ''',

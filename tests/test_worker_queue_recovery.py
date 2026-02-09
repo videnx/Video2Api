@@ -120,3 +120,47 @@ def test_nurture_batch_claim_and_requeue(temp_db):
     assert jobs[0]["status"] == "queued"
     assert jobs[0]["phase"] == "queue"
 
+
+def test_nurture_running_without_lease_recovered_on_startup(temp_db):
+    del temp_db
+    batch_id = sqlite_db.create_sora_nurture_batch(
+        {
+            "name": "batch-no-lease",
+            "group_title": "Sora",
+            "profile_ids_json": "[8]",
+            "total_jobs": 1,
+            "status": "running",
+        }
+    )
+    sqlite_db.create_sora_nurture_job(
+        {
+            "batch_id": batch_id,
+            "profile_id": 8,
+            "window_name": "win-8",
+            "group_title": "Sora",
+            "status": "running",
+            "phase": "engage",
+        }
+    )
+    sqlite_db.update_sora_nurture_batch(
+        batch_id,
+        {
+            "status": "running",
+            "lease_owner": None,
+            "lease_until": None,
+            "heartbeat_at": None,
+        },
+    )
+
+    requeued = sqlite_db.requeue_stale_sora_nurture_batches()
+    assert requeued == 1
+
+    batch_row = sqlite_db.get_sora_nurture_batch(batch_id)
+    assert batch_row
+    assert batch_row["status"] == "queued"
+    assert batch_row["run_last_error"] == "startup recovered stale running batch"
+
+    jobs = sqlite_db.list_sora_nurture_jobs(batch_id=batch_id, limit=10)
+    assert jobs and jobs[0]["status"] == "queued"
+    assert jobs[0]["phase"] == "queue"
+    assert jobs[0]["error"] == "startup recovered stale running batch"

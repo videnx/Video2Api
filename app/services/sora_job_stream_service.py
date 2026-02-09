@@ -80,6 +80,7 @@ class SoraJobStreamService:
             job.status,
             job.phase,
             job.progress_pct,
+            job.image_url,
             job.task_id,
             job.generation_id,
             job.publish_url,

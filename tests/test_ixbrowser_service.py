@@ -11,6 +11,7 @@ from app.models.ixbrowser import (
     IXBrowserSessionScanResponse,
     IXBrowserWindow,
     SoraAccountWeight,
+    SoraJobRequest,
 )
 from app.services.ixbrowser_service import IXBrowserAPIError, IXBrowserNotFoundError, IXBrowserService, IXBrowserServiceError
 
@@ -84,7 +85,8 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
             )
         ]
 
-    async def _fake_open_profile(profile_id, restart_if_opened=False):
+    async def _fake_open_profile(profile_id, max_attempts=3):
+        del max_attempts
         return {"ws": f"ws://127.0.0.1/mock-{profile_id}"}
 
     async def _fake_close_profile(_profile_id):
@@ -127,7 +129,7 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
         return quota_responses.pop(0)
 
     service.list_group_windows = _fake_list_group_windows
-    service._open_profile = _fake_open_profile
+    service._open_profile_with_retry = _fake_open_profile
     service._close_profile = _fake_close_profile
     service._fetch_sora_session = _fake_fetch_sora_session
     service._fetch_sora_quota = _fake_fetch_sora_quota
@@ -274,7 +276,8 @@ async def test_scan_group_sora_sessions_with_profile_ids_only_scans_selected(mon
 
     open_calls = []
 
-    async def _fake_open_profile(profile_id, restart_if_opened=False):
+    async def _fake_open_profile(profile_id, max_attempts=3):
+        del max_attempts
         open_calls.append(int(profile_id))
         return {"ws": f"ws://127.0.0.1/mock-{profile_id}"}
 
@@ -344,7 +347,7 @@ async def test_scan_group_sora_sessions_with_profile_ids_only_scans_selected(mon
     )
 
     service.list_group_windows = _fake_list_group_windows
-    service._open_profile = _fake_open_profile
+    service._open_profile_with_retry = _fake_open_profile
     service._close_profile = _fake_close_profile
     service._fetch_sora_session = _fake_fetch_sora_session
     service._fetch_sora_quota = _fake_fetch_sora_quota
@@ -426,7 +429,8 @@ async def test_scan_group_sora_sessions_with_profile_ids_without_history_keeps_p
             )
         ]
 
-    async def _fake_open_profile(profile_id, restart_if_opened=False):
+    async def _fake_open_profile(profile_id, max_attempts=3):
+        del max_attempts
         return {"ws": f"ws://127.0.0.1/mock-{profile_id}"}
 
     async def _fake_close_profile(_profile_id):
@@ -453,7 +457,7 @@ async def test_scan_group_sora_sessions_with_profile_ids_without_history_keeps_p
         }
 
     service.list_group_windows = _fake_list_group_windows
-    service._open_profile = _fake_open_profile
+    service._open_profile_with_retry = _fake_open_profile
     service._close_profile = _fake_close_profile
     service._fetch_sora_session = _fake_fetch_sora_session
     service._fetch_sora_quota = _fake_fetch_sora_quota
@@ -593,6 +597,306 @@ async def test_open_profile_window_returns_normalized_open_data():
     assert result.window_name == "win-222"
     assert result.debugging_address == "127.0.0.1:9222"
     assert result.ws is None
+
+
+@pytest.mark.asyncio
+async def test_open_profile_with_retry_prefers_opened_profile():
+    service = IXBrowserService()
+    open_calls = {"count": 0}
+
+    async def _fake_get_opened_profile(_profile_id):
+        return {"ws": "ws://127.0.0.1:3555/devtools/browser/mock"}
+
+    async def _fake_open_profile(_profile_id, restart_if_opened=False, headless=False):
+        del restart_if_opened, headless
+        open_calls["count"] += 1
+        raise AssertionError("不应调用 profile-open")
+
+    service._get_opened_profile = _fake_get_opened_profile
+    service._open_profile = _fake_open_profile
+
+    result = await service._open_profile_with_retry(profile_id=3555, max_attempts=2)
+
+    assert result.get("ws") == "ws://127.0.0.1:3555/devtools/browser/mock"
+    assert open_calls["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_open_profile_with_retry_attaches_after_111003(monkeypatch):
+    service = IXBrowserService()
+    state = {"opened_calls": 0, "open_calls": 0}
+
+    async def _fake_get_opened_profile(_profile_id):
+        state["opened_calls"] += 1
+        # 先查不到；命中 111003 后短时轮询才出现。
+        if state["opened_calls"] >= 3:
+            return {"ws": "ws://127.0.0.1:1777/devtools/browser/mock"}
+        return None
+
+    async def _fake_open_profile(_profile_id, restart_if_opened=False, headless=False):
+        del restart_if_opened, headless
+        state["open_calls"] += 1
+        raise IXBrowserAPIError(111003, "当前窗口已经打开")
+
+    async def _fake_ensure_profile_closed(_profile_id, wait_seconds=8.0):
+        del wait_seconds
+        raise AssertionError("附着成功时不应执行关闭后重开")
+
+    async def _fast_sleep(_seconds):
+        return None
+
+    service._get_opened_profile = _fake_get_opened_profile
+    service._open_profile = _fake_open_profile
+    service._ensure_profile_closed = _fake_ensure_profile_closed
+    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.sleep", _fast_sleep)
+
+    result = await service._open_profile_with_retry(profile_id=1777, max_attempts=1)
+
+    assert result.get("ws") == "ws://127.0.0.1:1777/devtools/browser/mock"
+    assert state["open_calls"] == 1
+    assert state["opened_calls"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_open_profile_with_retry_reopens_when_111003_without_debugging():
+    service = IXBrowserService()
+    open_calls = []
+    closed = []
+
+    async def _fake_get_opened_profile(_profile_id):
+        return None
+
+    async def _fake_wait_for_opened_profile(_profile_id, timeout_seconds=2.8, interval_seconds=0.4):
+        del timeout_seconds, interval_seconds
+        return None
+
+    async def _fake_open_profile(_profile_id, restart_if_opened=False, headless=False):
+        del restart_if_opened, headless
+        open_calls.append(int(_profile_id))
+        if len(open_calls) == 1:
+            raise IXBrowserAPIError(111003, "当前窗口已经打开")
+        return {"debugPort": 9333}
+
+    async def _fake_ensure_profile_closed(profile_id, wait_seconds=8.0):
+        del wait_seconds
+        closed.append(int(profile_id))
+
+    service._get_opened_profile = _fake_get_opened_profile
+    service._wait_for_opened_profile = _fake_wait_for_opened_profile
+    service._open_profile = _fake_open_profile
+    service._ensure_profile_closed = _fake_ensure_profile_closed
+
+    result = await service._open_profile_with_retry(profile_id=9333, max_attempts=1)
+
+    assert open_calls == [9333, 9333]
+    assert closed == [9333]
+    assert result.get("debugging_address") == "127.0.0.1:9333"
+
+
+@pytest.mark.asyncio
+async def test_open_profile_with_retry_resets_open_state_after_reopen_111003():
+    service = IXBrowserService()
+    open_calls = []
+    closed = []
+    reset_calls = []
+
+    async def _fake_get_opened_profile(_profile_id):
+        return None
+
+    async def _fake_wait_for_opened_profile(_profile_id, timeout_seconds=2.8, interval_seconds=0.4):
+        del timeout_seconds, interval_seconds
+        return None
+
+    async def _fake_open_profile(_profile_id, restart_if_opened=False, headless=False):
+        del restart_if_opened, headless
+        open_calls.append(int(_profile_id))
+        if len(open_calls) <= 2:
+            raise IXBrowserAPIError(111003, "当前窗口已经打开")
+        return {"ws": "ws://127.0.0.1:9333/devtools/browser/mock"}
+
+    async def _fake_ensure_profile_closed(profile_id, wait_seconds=8.0):
+        del wait_seconds
+        closed.append(int(profile_id))
+
+    async def _fake_reset_profile_open_state(profile_id):
+        reset_calls.append(int(profile_id))
+        return True
+
+    service._get_opened_profile = _fake_get_opened_profile
+    service._wait_for_opened_profile = _fake_wait_for_opened_profile
+    service._open_profile = _fake_open_profile
+    service._ensure_profile_closed = _fake_ensure_profile_closed
+    service._reset_profile_open_state = _fake_reset_profile_open_state
+
+    result = await service._open_profile_with_retry(profile_id=9333, max_attempts=1)
+
+    assert open_calls == [9333, 9333, 9333]
+    assert closed == [9333]
+    assert reset_calls == [9333]
+    assert result.get("ws") == "ws://127.0.0.1:9333/devtools/browser/mock"
+
+
+@pytest.mark.asyncio
+async def test_open_profile_with_retry_fails_fast_when_reset_cannot_fix_111003(monkeypatch):
+    service = IXBrowserService()
+    open_calls = []
+    closed = []
+    reset_calls = []
+
+    async def _fake_get_opened_profile(_profile_id):
+        return None
+
+    async def _fake_wait_for_opened_profile(_profile_id, timeout_seconds=2.8, interval_seconds=0.4):
+        del timeout_seconds, interval_seconds
+        return None
+
+    async def _fake_open_profile(_profile_id, restart_if_opened=False, headless=False):
+        del restart_if_opened, headless
+        open_calls.append(int(_profile_id))
+        raise IXBrowserAPIError(111003, "当前窗口已经打开")
+
+    async def _fake_ensure_profile_closed(profile_id, wait_seconds=8.0):
+        del wait_seconds
+        closed.append(int(profile_id))
+
+    async def _fake_reset_profile_open_state(profile_id):
+        reset_calls.append(int(profile_id))
+        return True
+
+    async def _boom_sleep(_seconds):
+        raise AssertionError("重置后命中 111003 应快速失败，不应进入下一轮重试")
+
+    service._get_opened_profile = _fake_get_opened_profile
+    service._wait_for_opened_profile = _fake_wait_for_opened_profile
+    service._open_profile = _fake_open_profile
+    service._ensure_profile_closed = _fake_ensure_profile_closed
+    service._reset_profile_open_state = _fake_reset_profile_open_state
+    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.sleep", _boom_sleep)
+
+    with pytest.raises(IXBrowserAPIError) as exc_info:
+        await service._open_profile_with_retry(profile_id=9444, max_attempts=3)
+
+    assert exc_info.value.code == 111003
+    assert open_calls == [9444, 9444, 9444]
+    assert closed == [9444]
+    assert reset_calls == [9444]
+
+
+@pytest.mark.asyncio
+async def test_scan_group_sora_sessions_does_not_preclose_opened_profiles(monkeypatch):
+    service = IXBrowserService()
+
+    async def _fake_list_group_windows():
+        return [
+            IXBrowserGroupWindows(
+                id=1,
+                title="Sora",
+                window_count=1,
+                windows=[IXBrowserWindow(profile_id=11, name="win-11")],
+            )
+        ]
+
+    async def _boom_list_opened_profile_ids():
+        raise AssertionError("扫描不应预查询已打开窗口")
+
+    async def _boom_ensure_profile_closed(_profile_id, wait_seconds=8.0):
+        del wait_seconds
+        raise AssertionError("扫描不应在开始前预关闭窗口")
+
+    async def _fake_open_profile_with_retry(profile_id, max_attempts=3):
+        del max_attempts
+        return {"ws": f"ws://127.0.0.1/mock-{profile_id}"}
+
+    async def _fake_close_profile(_profile_id):
+        return True
+
+    async def _fake_fetch_sora_session(_browser, _profile_id=None):
+        return (
+            200,
+            {"user": {"email": "scan@example.com"}, "accessToken": _build_access_token("free")},
+            "{\"ok\":true}",
+        )
+
+    async def _fake_fetch_sora_quota(_browser, _profile_id=None, _session_obj=None):
+        return {
+            "remaining_count": 5,
+            "total_count": 5,
+            "reset_at": "2026-02-09T00:00:00+00:00",
+            "source": "https://sora.chatgpt.com/backend/nf/check",
+            "payload": {"ok": True},
+            "error": None,
+        }
+
+    service.list_group_windows = _fake_list_group_windows
+    service._list_opened_profile_ids = _boom_list_opened_profile_ids
+    service._ensure_profile_closed = _boom_ensure_profile_closed
+    service._open_profile_with_retry = _fake_open_profile_with_retry
+    service._close_profile = _fake_close_profile
+    service._fetch_sora_session = _fake_fetch_sora_session
+    service._fetch_sora_quota = _fake_fetch_sora_quota
+    service._save_scan_response = lambda *_args, **_kwargs: 301
+    service._apply_fallback_from_history = lambda _response: None
+
+    monkeypatch.setattr("app.services.ixbrowser_service.async_playwright", lambda: _FakePlaywrightContext())
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
+        lambda _run_id: {"scanned_at": "2026-02-09 12:00:00"},
+    )
+
+    result = await service.scan_group_sora_sessions(group_title="Sora", with_fallback=False)
+
+    assert result.total_windows == 1
+    assert result.success_count == 1
+    assert result.failed_count == 0
+    assert result.results[0].account == "scan@example.com"
+
+
+@pytest.mark.asyncio
+async def test_scan_single_window_via_browser_always_closes_profile():
+    service = IXBrowserService()
+    window = IXBrowserWindow(profile_id=31, name="win-31")
+    group = IXBrowserGroupWindows(id=1, title="Sora", window_count=1, windows=[window])
+    closed = []
+
+    async def _fake_open_profile_with_retry(profile_id, max_attempts=2):
+        del max_attempts
+        return {"ws": f"ws://127.0.0.1/mock-{profile_id}"}
+
+    async def _fake_close_profile(profile_id):
+        closed.append(int(profile_id))
+        return True
+
+    async def _fake_fetch_sora_session(_browser, _profile_id=None):
+        return (
+            200,
+            {"user": {"email": "fallback@example.com"}, "accessToken": _build_access_token("plus")},
+            "{\"ok\":true}",
+        )
+
+    async def _fake_fetch_sora_quota(_browser, _profile_id=None, _session_obj=None):
+        return {
+            "remaining_count": 4,
+            "total_count": 5,
+            "reset_at": "2026-02-09T00:00:00+00:00",
+            "source": "https://sora.chatgpt.com/backend/nf/check",
+            "payload": {"ok": True},
+            "error": None,
+        }
+
+    service._open_profile_with_retry = _fake_open_profile_with_retry
+    service._close_profile = _fake_close_profile
+    service._fetch_sora_session = _fake_fetch_sora_session
+    service._fetch_sora_quota = _fake_fetch_sora_quota
+
+    item = await service._scan_single_window_via_browser(
+        playwright=_FakePlaywright(),
+        window=window,
+        target_group=group,
+    )
+
+    assert item.success is True
+    assert item.close_success is True
+    assert closed == [31]
 
 
 def test_parse_sora_nf_check_payload():
@@ -828,6 +1132,51 @@ async def test_create_sora_generate_job_validates_duration():
 
 
 @pytest.mark.asyncio
+async def test_create_sora_job_persists_image_url(monkeypatch):
+    service = IXBrowserService()
+
+    request = SoraJobRequest(
+        profile_id=1,
+        dispatch_mode="manual",
+        group_title="Sora",
+        prompt="hello",
+        image_url="  https://example.com/ref.png  ",
+        duration="10s",
+        aspect_ratio="landscape",
+    )
+
+    async def _fake_get_window_from_group(profile_id, group_title):
+        assert profile_id == 1
+        assert group_title == "Sora"
+        return IXBrowserWindow(profile_id=1, name="win-1")
+
+    captured = {}
+
+    def _fake_create_sora_job(data):
+        captured.update(dict(data))
+        return 88
+
+    monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_sora_job", _fake_create_sora_job)
+    monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_sora_job_event", lambda *_args, **_kwargs: 1)
+    service._get_window_from_group = _fake_get_window_from_group
+    service.get_sora_job = lambda jid: {
+        "job_id": jid,
+        "profile_id": 1,
+        "prompt": "hello",
+        "duration": "10s",
+        "aspect_ratio": "landscape",
+        "status": "queued",
+        "phase": "queue",
+        "created_at": "2026-02-09 10:00:00",
+        "updated_at": "2026-02-09 10:00:00",
+    }
+
+    result = await service.create_sora_job(request=request, operator_user={"id": 1, "username": "admin"})
+    assert result.job.job_id == 88
+    assert captured["image_url"] == "https://example.com/ref.png"
+
+
+@pytest.mark.asyncio
 async def test_retry_sora_job_overload_creates_new_job(monkeypatch):
     service = IXBrowserService()
 
@@ -839,6 +1188,7 @@ async def test_retry_sora_job_overload_creates_new_job(monkeypatch):
         "window_name": "win-1",
         "group_title": "Sora",
         "prompt": "hello sora",
+        "image_url": "https://example.com/retry.png",
         "duration": "10s",
         "aspect_ratio": "landscape",
         "status": "failed",
@@ -924,6 +1274,7 @@ async def test_retry_sora_job_overload_creates_new_job(monkeypatch):
 
     assert created_payload["profile_id"] == 2
     assert created_payload["prompt"] == old_row["prompt"]
+    assert created_payload["image_url"] == old_row["image_url"]
     assert created_payload["duration"] == old_row["duration"]
     assert created_payload["aspect_ratio"] == old_row["aspect_ratio"]
     assert created_payload["dispatch_mode"] == "weighted_auto"
@@ -1273,10 +1624,11 @@ async def test_run_sora_job_submit_overload_auto_spawns_new_job(monkeypatch):
         "id": old_job_id,
         "profile_id": old_profile_id,
         "window_name": "win-1",
-        "group_title": "Sora",
-        "prompt": "hello sora",
-        "duration": "10s",
-        "aspect_ratio": "landscape",
+            "group_title": "Sora",
+            "prompt": "hello sora",
+            "image_url": "https://example.com/auto-retry.png",
+            "duration": "10s",
+            "aspect_ratio": "landscape",
         "status": "queued",
         "phase": "queue",
         "error": None,
@@ -1345,13 +1697,14 @@ async def test_run_sora_job_submit_overload_auto_spawns_new_job(monkeypatch):
     async def _fake_submit_and_progress(**_kwargs):
         raise IXBrowserServiceError("We're under heavy load, please try again later.")
 
-    service._run_sora_submit_and_progress = _fake_submit_and_progress
+    service._sora_generation_workflow.run_sora_submit_and_progress = _fake_submit_and_progress
 
     await IXBrowserService._run_sora_job(service, old_job_id)
 
     assert called["group_title"] == "Sora"
     assert called["exclude_profile_ids"] == [old_profile_id]
     assert created_payload["profile_id"] == 2
+    assert created_payload["image_url"] == "https://example.com/auto-retry.png"
     assert created_payload["dispatch_mode"] == "weighted_auto"
     assert created_payload["retry_of_job_id"] == old_job_id
     assert created_payload["retry_root_job_id"] == old_job_id
@@ -1363,6 +1716,7 @@ async def test_run_sora_job_submit_overload_auto_spawns_new_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_publish_sora_post_with_backoff_retries_invalid_request():
     service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
 
     class _DummyContext:
         pass
@@ -1394,11 +1748,11 @@ async def test_publish_sora_post_with_backoff_retries_invalid_request():
             }
         return {"publish_url": "https://sora.chatgpt.com/p/s_12345678", "error": None}
 
-    service._get_device_id_from_context = _fake_get_device_id
-    service._publish_sora_post_from_page = _fake_publish_sora_post_from_page
+    publish_workflow._get_device_id_from_context = _fake_get_device_id  # noqa: SLF001
+    publish_workflow._publish_sora_post_from_page = _fake_publish_sora_post_from_page  # noqa: SLF001
 
     page = _DummyPage()
-    result = await service._publish_sora_post_with_backoff(
+    result = await publish_workflow._publish_sora_post_with_backoff(
         page,
         task_id="task_x",
         prompt="prompt_x",
@@ -1416,6 +1770,7 @@ async def test_publish_sora_post_with_backoff_retries_invalid_request():
 @pytest.mark.asyncio
 async def test_sora_fetch_json_via_page_retries_on_cf_then_succeeds():
     service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
 
     class _FakePage:
         def __init__(self, results):
@@ -1449,7 +1804,7 @@ async def test_sora_fetch_json_via_page_retries_on_cf_then_succeeds():
         ]
     )
 
-    result = await service._sora_fetch_json_via_page(
+    result = await publish_workflow.sora_fetch_json_via_page(
         page,
         "https://sora.chatgpt.com/backend/billing/subscriptions",
         headers={"Authorization": "Bearer token"},
@@ -1468,6 +1823,7 @@ async def test_sora_fetch_json_via_page_retries_on_cf_then_succeeds():
 @pytest.mark.asyncio
 async def test_fetch_draft_item_by_task_id_via_context_does_not_use_context_request(monkeypatch):
     service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
 
     class _NoRequest:
         async def get(self, *_args, **_kwargs):
@@ -1509,9 +1865,9 @@ async def test_fetch_draft_item_by_task_id_via_context_does_not_use_context_requ
             "is_cf": False,
         }
 
-    monkeypatch.setattr(service, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
+    monkeypatch.setattr(publish_workflow, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
 
-    item = await service._fetch_draft_item_by_task_id_via_context(
+    item = await publish_workflow._fetch_draft_item_by_task_id_via_context(
         context=context,
         task_id="task_123",
         limit=15,
@@ -1526,6 +1882,7 @@ async def test_fetch_draft_item_by_task_id_via_context_does_not_use_context_requ
 @pytest.mark.asyncio
 async def test_poll_sora_task_from_page_does_not_use_context_request(monkeypatch):
     service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
 
     class _NoRequest:
         async def get(self, *_args, **_kwargs):
@@ -1548,10 +1905,10 @@ async def test_poll_sora_task_from_page_does_not_use_context_request(monkeypatch
             return {"status": 200, "raw": "[]", "json": [{"id": "task_1", "progress": 0.5}], "error": None, "is_cf": False}
         raise AssertionError("不应请求 drafts")
 
-    monkeypatch.setattr(service, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
+    monkeypatch.setattr(publish_workflow, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
 
     page = _FakePage()
-    result = await service._poll_sora_task_from_page(
+    result = await publish_workflow.poll_sora_task_from_page(
         page=page,
         task_id="task_1",
         access_token="token",
@@ -1560,3 +1917,385 @@ async def test_poll_sora_task_from_page_does_not_use_context_request(monkeypatch
 
     assert calls and any("backend/nf/pending/v2" in url for url in calls)
     assert result["state"] == "processing"
+
+
+@pytest.mark.asyncio
+async def test_poll_sora_task_from_page_uses_stair_backoff_for_drafts(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    class _FakeContext:
+        pass
+
+    class _FakePage:
+        def __init__(self):
+            self.context = _FakeContext()
+            self.waits = []
+
+        async def wait_for_timeout(self, ms):
+            self.waits.append(int(ms))
+
+    async def _fake_fetch(page_obj, url, **_kwargs):
+        del page_obj
+        assert "pending" in str(url)
+        return {"status": 200, "raw": "[]", "json": [], "error": None, "is_cf": False}
+
+    draft_calls = []
+
+    async def _fake_fetch_draft(*_args, **_kwargs):
+        draft_calls.append(1)
+        return None
+
+    monkeypatch.setattr(publish_workflow, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
+    monkeypatch.setattr(publish_workflow, "_fetch_draft_item_by_task_id", _fake_fetch_draft, raising=True)
+
+    page = _FakePage()
+    result = await publish_workflow.poll_sora_task_from_page(
+        page=page,
+        task_id="task_1",
+        access_token="token",
+        fetch_drafts=False,
+    )
+
+    assert result["state"] == "processing"
+    assert page.waits == [1000, 2000, 3000, 10000, 60000]
+    assert len(draft_calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_poll_sora_task_from_page_stops_backoff_after_draft_hit(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    class _FakeContext:
+        pass
+
+    class _FakePage:
+        def __init__(self):
+            self.context = _FakeContext()
+            self.waits = []
+
+        async def wait_for_timeout(self, ms):
+            self.waits.append(int(ms))
+
+    async def _fake_fetch(page_obj, url, **_kwargs):
+        del page_obj
+        assert "pending" in str(url)
+        return {"status": 200, "raw": "[]", "json": [], "error": None, "is_cf": False}
+
+    drafts = [
+        None,
+        {"task_id": "task_1", "generation_id": "gen_ready", "url": "https://sora.chatgpt.com/d/gen_ready"},
+    ]
+
+    async def _fake_fetch_draft(*_args, **_kwargs):
+        return drafts.pop(0)
+
+    monkeypatch.setattr(publish_workflow, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
+    monkeypatch.setattr(publish_workflow, "_fetch_draft_item_by_task_id", _fake_fetch_draft, raising=True)
+
+    page = _FakePage()
+    result = await publish_workflow.poll_sora_task_from_page(
+        page=page,
+        task_id="task_1",
+        access_token="token",
+        fetch_drafts=False,
+    )
+
+    assert result["state"] == "completed"
+    assert result["generation_id"] == "gen_ready"
+    assert page.waits == [1000]
+
+
+@pytest.mark.asyncio
+async def test_poll_sora_task_via_proxy_api_cf_fast_fallback(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    sleep_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    async def _fake_request(url, access_token, **_kwargs):
+        del access_token
+        return {
+            "status": 403,
+            "raw": "<html>Just a moment...</html>",
+            "json": None,
+            "error": "cf_challenge",
+            "source": url,
+        }
+
+    monkeypatch.setattr("app.services.ixbrowser.sora_publish_workflow.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr(service, "_request_sora_api_via_curl_cffi", _fake_request, raising=True)
+
+    result = await publish_workflow.poll_sora_task_via_proxy_api(
+        profile_id=1,
+        task_id="task_1",
+        access_token="token",
+        fetch_drafts=True,
+    )
+
+    assert result["state"] == "processing"
+    assert result["cf_challenge"] is True
+    assert sleep_calls == []
+
+
+@pytest.mark.asyncio
+async def test_poll_sora_task_via_proxy_api_uses_stair_backoff_for_drafts(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    sleep_calls = []
+    draft_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(int(seconds))
+
+    async def _fake_request(url, access_token, **_kwargs):
+        del access_token
+        if "backend/nf/pending" in str(url):
+            return {
+                "status": 200,
+                "raw": "[]",
+                "json": [],
+                "error": None,
+                "source": url,
+            }
+        if "profile/drafts" in str(url):
+            draft_calls.append(1)
+            return {
+                "status": 200,
+                "raw": "{\"items\":[]}",
+                "json": {"items": []},
+                "error": None,
+                "source": url,
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("app.services.ixbrowser.sora_publish_workflow.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr(
+        publish_workflow,
+        "_build_proxy_request_context",
+        lambda _profile_id: {"proxy_url": None, "user_agent": "ua"},
+        raising=True,
+    )
+    monkeypatch.setattr(service, "_request_sora_api_via_curl_cffi", _fake_request, raising=True)
+
+    result = await publish_workflow.poll_sora_task_via_proxy_api(
+        profile_id=1,
+        task_id="task_1",
+        access_token="token",
+        fetch_drafts=False,
+    )
+
+    assert result["state"] == "processing"
+    assert result["pending_missing"] is True
+    assert sleep_calls == [1, 2, 3, 10, 60]
+    assert len(draft_calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_poll_sora_task_via_proxy_api_stops_backoff_after_draft_hit(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    sleep_calls = []
+    draft_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(int(seconds))
+
+    async def _fake_request(url, access_token, **_kwargs):
+        del access_token
+        if "backend/nf/pending" in str(url):
+            return {
+                "status": 200,
+                "raw": "[]",
+                "json": [],
+                "error": None,
+                "source": url,
+            }
+        if "profile/drafts" in str(url):
+            draft_calls.append(1)
+            if len(draft_calls) == 1:
+                return {
+                    "status": 200,
+                    "raw": "{\"items\":[]}",
+                    "json": {"items": []},
+                    "error": None,
+                    "source": url,
+                }
+            return {
+                "status": 200,
+                "raw": "{\"items\":[{\"id\":\"task_1\",\"generation_id\":\"gen_ready\"}]}",
+                "json": {"items": [{"id": "task_1", "generation_id": "gen_ready"}]},
+                "error": None,
+                "source": url,
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("app.services.ixbrowser.sora_publish_workflow.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr(
+        publish_workflow,
+        "_build_proxy_request_context",
+        lambda _profile_id: {"proxy_url": None, "user_agent": "ua"},
+        raising=True,
+    )
+    monkeypatch.setattr(service, "_request_sora_api_via_curl_cffi", _fake_request, raising=True)
+
+    result = await publish_workflow.poll_sora_task_via_proxy_api(
+        profile_id=1,
+        task_id="task_1",
+        access_token="token",
+        fetch_drafts=False,
+    )
+
+    assert result["state"] == "completed"
+    assert result["generation_id"] == "gen_ready"
+    assert sleep_calls == [1]
+    assert len(draft_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_sora_task_via_proxy_api_failed_draft_stops_long_wait(monkeypatch):
+    service = IXBrowserService()
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    sleep_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(int(seconds))
+
+    async def _fake_request(url, access_token, **_kwargs):
+        del access_token
+        if "backend/nf/pending" in str(url):
+            return {
+                "status": 200,
+                "raw": "[]",
+                "json": [],
+                "error": None,
+                "source": url,
+            }
+        if "profile/drafts" in str(url):
+            return {
+                "status": 200,
+                "raw": "{\"items\":[{\"id\":\"task_1\",\"reason_str\":\"failed_reason\"}]}",
+                "json": {"items": [{"id": "task_1", "reason_str": "failed_reason"}]},
+                "error": None,
+                "source": url,
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("app.services.ixbrowser.sora_publish_workflow.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr(
+        publish_workflow,
+        "_build_proxy_request_context",
+        lambda _profile_id: {"proxy_url": None, "user_agent": "ua"},
+        raising=True,
+    )
+    monkeypatch.setattr(service, "_request_sora_api_via_curl_cffi", _fake_request, raising=True)
+
+    result = await publish_workflow.poll_sora_task_via_proxy_api(
+        profile_id=1,
+        task_id="task_1",
+        access_token="token",
+        fetch_drafts=False,
+    )
+
+    assert result["state"] == "failed"
+    assert "failed_reason" in str(result["error"])
+    assert sleep_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_sora_submit_and_progress_not_finished_by_pending_missing(monkeypatch):
+    service = IXBrowserService()
+    workflow = service._sora_generation_workflow  # noqa: SLF001
+    publish_workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    class _FakePage:
+        async def goto(self, *_args, **_kwargs):
+            return None
+
+        async def wait_for_timeout(self, *_args, **_kwargs):
+            return None
+
+        def on(self, *_args, **_kwargs):
+            return None
+
+    class _FakeContext:
+        def __init__(self):
+            self.pages = [_FakePage()]
+
+    class _FakeBrowser:
+        def __init__(self):
+            self.contexts = [_FakeContext()]
+
+        async def close(self):
+            return None
+
+    class _FakeChromium:
+        async def connect_over_cdp(self, *_args, **_kwargs):
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        def __init__(self):
+            self.chromium = _FakeChromium()
+
+    class _FakePlaywrightContext:
+        async def __aenter__(self):
+            return _FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def _fake_open_profile(*_args, **_kwargs):
+        return {"ws": "ws://127.0.0.1/mock"}
+
+    async def _fake_close_profile(*_args, **_kwargs):
+        return True
+
+    async def _fake_device_id(*_args, **_kwargs):
+        return "did_x"
+
+    submit_kwargs = {}
+
+    async def _fake_submit(*_args, **_kwargs):
+        submit_kwargs.update(dict(_kwargs))
+        return {"task_id": "task_1", "access_token": "token_1", "error": None}
+
+    states = [
+        {"state": "processing", "progress": 0.2, "pending_missing": True, "cf_challenge": False},
+        {"state": "completed", "progress": 1.0, "generation_id": "gen_1", "cf_challenge": False},
+    ]
+
+    async def _fake_proxy_poll(**_kwargs):
+        return states.pop(0)
+
+    async def _fake_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ixbrowser.sora_generation_workflow.async_playwright", lambda: _FakePlaywrightContext())
+    monkeypatch.setattr("app.services.ixbrowser.sora_generation_workflow.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr(workflow, "_open_profile_with_retry", _fake_open_profile, raising=True)
+    monkeypatch.setattr(workflow, "_close_profile", _fake_close_profile, raising=True)
+    monkeypatch.setattr(workflow, "_is_sora_job_canceled", lambda _job_id: False, raising=True)
+    monkeypatch.setattr(publish_workflow, "_get_device_id_from_context", _fake_device_id, raising=True)
+    monkeypatch.setattr(publish_workflow, "_submit_video_request_from_page", _fake_submit, raising=True)
+    monkeypatch.setattr(publish_workflow, "poll_sora_task_via_proxy_api", _fake_proxy_poll, raising=True)
+
+    task_id, generation_id = await workflow.run_sora_submit_and_progress(
+        job_id=999999,
+        profile_id=1,
+        prompt="test prompt",
+        duration="10s",
+        aspect_ratio="landscape",
+        started_at="2026-02-09 10:00:00",
+        image_url="https://example.com/submit.png",
+    )
+
+    assert task_id == "task_1"
+    assert generation_id == "gen_1"
+    assert submit_kwargs.get("image_url") == "https://example.com/submit.png"

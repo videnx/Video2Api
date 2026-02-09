@@ -201,16 +201,20 @@ async def test_admin_selftest_ui_smoke(monkeypatch, tmp_path):
                 )
 
                 # 默认折叠下，直接按分组勾选（全选该组窗口）
-                group_checkbox = page.locator(".nurture-page .group-select-panel .pick-group-head .el-checkbox").first
+                group_checkbox = page.locator(
+                    '.nurture-page .step-card:has-text("步骤 1：选择账号") .group-select-panel .pick-group-head .el-checkbox'
+                ).first
                 await group_checkbox.wait_for(state="visible", timeout=15_000)
                 await group_checkbox.click()
 
                 async with page.expect_response(
                     lambda r: r.url.endswith("/api/v1/nurture/batches") and r.request.method == "POST"
                 ):
-                    await page.get_by_role("button", name="创建并开始").click()
+                    await page.locator(
+                        '.nurture-page .step-card:has-text("步骤 2：配置策略并创建")'
+                    ).get_by_role("button", name="创建并开始").click()
 
-                batch_card = page.locator('.el-card:has-text("任务组列表")').first
+                batch_card = page.locator('.nurture-page .table-card:has-text("任务组列表")').first
                 batch_row = batch_card.locator(".el-table__body-wrapper tbody tr").first
                 await batch_row.wait_for(state="visible", timeout=15_000)
 

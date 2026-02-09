@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     secret_key: str = "video2api-secret-key"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24 * 7
+    video_api_bearer_token: str = ""
 
     log_level: str = "INFO"
     log_file: str = "logs/app.log"

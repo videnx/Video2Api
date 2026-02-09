@@ -31,6 +31,30 @@ def test_sora_job_runner_watermark_helpers():
     assert runner.build_third_party_watermark_url("https://sora.chatgpt.com/p/s_1234abcd").endswith("/s_1234abcd.mp4")
 
 
+def test_ixbrowser_workflows_initialized():
+    service = IXBrowserService()
+
+    assert service._sora_publish_workflow is not None  # noqa: SLF001
+    assert service._sora_generation_workflow is not None  # noqa: SLF001
+    assert service._sora_publish_workflow._service is service  # noqa: SLF001
+    assert service._sora_generation_workflow._service is service  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_sora_publish_workflow_public_aliases_delegate(monkeypatch):
+    service = IXBrowserService()
+    workflow = service._sora_publish_workflow  # noqa: SLF001
+
+    async def _fake_fetch(**kwargs):
+        del kwargs
+        return {"status": 200, "raw": "{}", "json": {}, "error": None, "is_cf": False}
+
+    monkeypatch.setattr(workflow, "_sora_fetch_json_via_page", _fake_fetch, raising=True)
+
+    data = await workflow.sora_fetch_json_via_page(page=object(), url="https://example.com")
+    assert data["status"] == 200
+
+
 @pytest.mark.asyncio
 async def test_sora_job_runner_delegates_watermark_parse(monkeypatch):
     service = IXBrowserService()
@@ -58,4 +82,3 @@ async def test_sora_job_runner_delegates_watermark_parse(monkeypatch):
 
     url = await runner.run_sora_watermark(job_id=1, publish_url="https://sora.chatgpt.com/p/s_1234abcd")
     assert url == "http://example.com/wm.mp4"
-

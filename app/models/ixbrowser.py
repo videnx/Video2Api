@@ -169,6 +169,7 @@ class SoraJobRequest(BaseModel):
     profile_id: Optional[int] = Field(default=None, ge=1)
     dispatch_mode: Optional[str] = None
     prompt: str
+    image_url: Optional[str] = None
     duration: str = "10s"
     aspect_ratio: str = "landscape"
     group_title: str = "Sora"
@@ -182,6 +183,14 @@ class SoraJobRequest(BaseModel):
         if text not in {"manual", "weighted_auto"}:
             raise ValueError("dispatch_mode must be manual or weighted_auto")
         return text
+
+    @field_validator("image_url")
+    @classmethod
+    def normalize_image_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class SoraWatermarkParseRequest(BaseModel):
@@ -206,6 +215,7 @@ class SoraJob(BaseModel):
     status: str
     phase: str
     progress_pct: Optional[float] = None
+    image_url: Optional[str] = None
     task_id: Optional[str] = None
     generation_id: Optional[str] = None
     publish_url: Optional[str] = None

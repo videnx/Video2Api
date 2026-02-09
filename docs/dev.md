@@ -41,6 +41,21 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 说明：
 - `.env` 中的 `PORT` 需要与你的启动参数保持一致（或直接用 `make backend-dev PORT=xxxx` 统一）。
 
+### 对外视频接口（`/v1/videos`）
+- 该接口用于第三方系统直接创建/查询视频任务，底层复用现有 Sora 任务内核。
+- 鉴权采用独立 Bearer Token：`Authorization: Bearer <TOKEN>`。
+- 需要在 `.env` 中配置 `VIDEO_API_BEARER_TOKEN`，未配置时接口返回 `503`（关闭状态）。
+- 已提供接口：
+  - `POST /v1/videos`：创建任务
+  - `GET /v1/videos/{video_id}`：查询任务（支持 `107` 或 `video_107`）
+
+### ixBrowser 服务结构（重构后）
+- `app/services/ixbrowser_service.py`：主协调层（对外服务入口、扫描/调度编排、模型构建）。
+- `app/services/ixbrowser/realtime_quota_service.py`：实时配额监听、入库与 SSE 推送。
+- `app/services/ixbrowser/sora_job_runner.py`：Sora 任务阶段状态机与去水印收尾。
+- `app/services/ixbrowser/sora_publish_workflow.py`：Sora 发布链路（发布、草稿检索、页面请求/轮询、发布链接捕获）。
+- `app/services/ixbrowser/sora_generation_workflow.py`：Sora 生成链路（提交、进度轮询、genid 获取、兼容生成任务发布）。
+
 ## 前端开发（admin/）
 1. 安装依赖
 ```bash

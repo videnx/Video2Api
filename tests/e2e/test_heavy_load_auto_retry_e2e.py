@@ -67,7 +67,7 @@ async def test_heavy_load_submit_auto_retry_spawns_new_job_and_visible_in_tasks(
             )
 
         monkeypatch.setattr(ixbrowser_service, "list_group_windows", _fake_list_group_windows)
-        monkeypatch.setattr(ixbrowser_service, "_run_sora_submit_and_progress", _fake_submit_and_progress)
+        monkeypatch.setattr(ixbrowser_service._sora_generation_workflow, "run_sora_submit_and_progress", _fake_submit_and_progress)
         monkeypatch.setattr(account_dispatch_service, "pick_best_account", _fake_pick_best_account)
 
         port = find_free_port()

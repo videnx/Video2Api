@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -330,3 +331,144 @@ async def test_run_batch_updates_totals(monkeypatch):
     assert batch_row["failed_count"] == 0
     assert batch_row["like_total"] == 3
     assert batch_row["follow_total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_run_batch_job_timeout_fail_fast_and_continue(monkeypatch):
+    monkeypatch.setattr("app.services.sora_nurture_service.async_playwright", lambda: _FakePlaywrightContext())
+
+    fake_db = _FakeDB()
+    service = SoraNurtureService(db=fake_db, ix=_FakeIX())
+    service._job_timeout_seconds = 1
+
+    req = SoraNurtureBatchCreateRequest(group_title="Sora", profile_ids=[1, 2], scroll_count=10)
+    batch = await service.create_batch(req, operator_user={"id": 1, "username": "admin"})
+    jobs = fake_db.list_sora_nurture_jobs(batch_id=batch["batch_id"], limit=10)
+    timeout_job_id = int(jobs[0]["id"])
+    complete_job_id = int(jobs[1]["id"])
+
+    async def _fake_run_single_job(*_args, **kwargs):
+        job_id = int(kwargs.get("job_id"))
+        if job_id == timeout_job_id:
+            await asyncio.sleep(1.2)
+            return {"status": "completed", "like_count": 0, "follow_count": 0, "scroll_done": 10, "error": None}
+        fake_db.update_sora_nurture_job(
+            job_id,
+            {
+                "status": "completed",
+                "phase": "done",
+                "scroll_done": 10,
+                "like_count": 0,
+                "follow_count": 0,
+                "finished_at": fake_db._now(),
+            },
+        )
+        return {"status": "completed", "like_count": 0, "follow_count": 0, "scroll_done": 10, "error": None}
+
+    monkeypatch.setattr(service, "_run_single_job", _fake_run_single_job)
+
+    await service._run_batch_impl(batch["batch_id"])
+
+    timeout_job = fake_db.get_sora_nurture_job(timeout_job_id)
+    complete_job = fake_db.get_sora_nurture_job(complete_job_id)
+    assert timeout_job["status"] == "failed"
+    assert "执行超时" in str(timeout_job.get("error") or "")
+    assert complete_job["status"] == "completed"
+    batch_row = fake_db.get_sora_nurture_batch(batch["batch_id"])
+    assert batch_row["status"] == "failed"
+    assert int(batch_row["failed_count"] or 0) == 1
+    assert int(batch_row["success_count"] or 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_failed_jobs_only_resets_failed():
+    fake_db = _FakeDB()
+    service = SoraNurtureService(db=fake_db, ix=_FakeIX())
+
+    req = SoraNurtureBatchCreateRequest(group_title="Sora", profile_ids=[1, 2, 3, 4], scroll_count=10)
+    batch = await service.create_batch(req, operator_user={"id": 1, "username": "admin"})
+    jobs = fake_db.list_sora_nurture_jobs(batch_id=batch["batch_id"], limit=10)
+    completed_job_id = int(jobs[0]["id"])
+    failed_job_id = int(jobs[1]["id"])
+    skipped_job_id = int(jobs[2]["id"])
+    canceled_job_id = int(jobs[3]["id"])
+
+    fake_db.update_sora_nurture_job(
+        completed_job_id,
+        {
+            "status": "completed",
+            "phase": "done",
+            "scroll_done": 10,
+            "like_count": 2,
+            "follow_count": 1,
+            "finished_at": fake_db._now(),
+        },
+    )
+    fake_db.update_sora_nurture_job(
+        failed_job_id,
+        {
+            "status": "failed",
+            "phase": "done",
+            "scroll_done": 3,
+            "like_count": 1,
+            "follow_count": 0,
+            "error": "boom",
+            "started_at": fake_db._now(),
+            "finished_at": fake_db._now(),
+        },
+    )
+    fake_db.update_sora_nurture_job(
+        skipped_job_id,
+        {
+            "status": "skipped",
+            "phase": "done",
+            "error": "skip",
+            "finished_at": fake_db._now(),
+        },
+    )
+    fake_db.update_sora_nurture_job(
+        canceled_job_id,
+        {
+            "status": "canceled",
+            "phase": "done",
+            "error": "canceled",
+            "finished_at": fake_db._now(),
+        },
+    )
+    fake_db.update_sora_nurture_batch(
+        batch["batch_id"],
+        {
+            "status": "failed",
+            "failed_count": 2,
+            "success_count": 1,
+            "canceled_count": 1,
+            "lease_owner": "worker-a",
+            "lease_until": "2099-01-01 00:00:00",
+            "heartbeat_at": fake_db._now(),
+            "error": "boom",
+            "finished_at": fake_db._now(),
+        },
+    )
+
+    retried = await service.retry_batch_failed_jobs(batch["batch_id"])
+
+    completed_job = fake_db.get_sora_nurture_job(completed_job_id)
+    failed_job = fake_db.get_sora_nurture_job(failed_job_id)
+    skipped_job = fake_db.get_sora_nurture_job(skipped_job_id)
+    canceled_job = fake_db.get_sora_nurture_job(canceled_job_id)
+
+    assert completed_job["status"] == "completed"
+    assert failed_job["status"] == "queued"
+    assert failed_job["phase"] == "queue"
+    assert int(failed_job.get("scroll_done") or 0) == 0
+    assert int(failed_job.get("like_count") or 0) == 0
+    assert int(failed_job.get("follow_count") or 0) == 0
+    assert failed_job.get("error") is None
+    assert failed_job.get("started_at") is None
+    assert failed_job.get("finished_at") is None
+    assert skipped_job["status"] == "skipped"
+    assert canceled_job["status"] == "canceled"
+
+    assert retried["status"] == "queued"
+    assert retried["error"] is None
+    assert retried["finished_at"] is None

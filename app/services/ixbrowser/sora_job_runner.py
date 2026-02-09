@@ -54,10 +54,11 @@ class SoraJobRunner:
 
             try:
                 if phase == "submit":
-                    task_id, generation_id = await self._service._run_sora_submit_and_progress(  # noqa: SLF001
+                    task_id, generation_id = await self._service._sora_generation_workflow.run_sora_submit_and_progress(  # noqa: SLF001
                         job_id=job_id,
                         profile_id=int(row["profile_id"]),
                         prompt=str(row["prompt"]),
+                        image_url=str(row.get("image_url") or "").strip() or None,
                         duration=str(row["duration"]),
                         aspect_ratio=str(row["aspect_ratio"]),
                         started_at=started_at,
@@ -67,7 +68,7 @@ class SoraJobRunner:
                 if phase == "progress":
                     if not task_id:
                         raise self._service_error("缺少 task_id，无法进入进度阶段")
-                    generation_id = await self._service._run_sora_progress_only(  # noqa: SLF001
+                    generation_id = await self._service._sora_generation_workflow.run_sora_progress_only(  # noqa: SLF001
                         job_id=job_id,
                         profile_id=int(row["profile_id"]),
                         task_id=task_id,
@@ -81,7 +82,7 @@ class SoraJobRunner:
                     self._db.update_sora_job(job_id, {"phase": "genid"})
                     self._db.create_sora_job_event(job_id, "genid", "start", "开始获取 genid")
                     if not generation_id:
-                        generation_id = await self._service._run_sora_fetch_generation_id(  # noqa: SLF001
+                        generation_id = await self._service._sora_generation_workflow.run_sora_fetch_generation_id(  # noqa: SLF001
                             job_id=job_id,
                             profile_id=int(row["profile_id"]),
                             task_id=task_id,
@@ -97,7 +98,7 @@ class SoraJobRunner:
                         raise self._service_error("缺少 genid，无法发布")
                     self._db.update_sora_job(job_id, {"phase": "publish"})
                     self._db.create_sora_job_event(job_id, "publish", "start", "开始发布")
-                    publish_url = await self._service._publish_sora_video(  # noqa: SLF001
+                    publish_url = await self._service._sora_publish_workflow._publish_sora_video(  # noqa: SLF001
                         profile_id=int(row["profile_id"]),
                         task_id=task_id,
                         task_url=None,

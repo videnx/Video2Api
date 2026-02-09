@@ -308,6 +308,13 @@
             show-word-limit
           />
         </el-form-item>
+        <el-form-item label="图片 URL">
+          <el-input
+            v-model="createForm.image_url"
+            placeholder="可选，传入参考图片 URL"
+            clearable
+          />
+        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -334,6 +341,15 @@
           <div class="detail-item"><span>无水印链接</span><strong>{{ detailJob.watermark_url || '-' }}</strong></div>
           <div class="detail-item"><span>去水印重试次数</span><strong>{{ detailJob.watermark_attempts ?? 0 }}</strong></div>
           <div class="detail-item"><span>去水印错误</span><strong>{{ detailJob.watermark_error || '-' }}</strong></div>
+          <div class="detail-item">
+            <span>图片URL</span>
+            <strong>
+              <a v-if="detailJob.image_url" href="#" @click.prevent="openLink(detailJob.image_url)">
+                {{ detailJob.image_url }}
+              </a>
+              <template v-else>-</template>
+            </strong>
+          </div>
         </div>
         <div class="detail-prompt">
           <div class="detail-label">Prompt</div>
@@ -410,6 +426,7 @@ const createForm = ref({
   dispatch_mode: 'weighted_auto',
   profile_id: null,
   prompt: '',
+  image_url: '',
   duration: '10s',
   aspect_ratio: 'landscape'
 })
@@ -435,6 +452,7 @@ const filteredJobs = computed(() => {
       job.task_id || '',
       job.generation_id || '',
       job.prompt || '',
+      job.image_url || '',
       job.error || '',
       job.watermark_url || '',
       job.watermark_error || ''
@@ -851,6 +869,7 @@ const openCreateDialog = () => {
     dispatch_mode: 'weighted_auto',
     profile_id: null,
     prompt: '',
+    image_url: '',
     duration: '10s',
     aspect_ratio: 'landscape'
   }
@@ -884,6 +903,7 @@ const submitTask = async () => {
     ElMessage.warning('请输入提示词')
     return
   }
+  const imageUrl = createForm.value.image_url?.trim()
   submitting.value = true
   try {
     const payload = {
@@ -892,6 +912,9 @@ const submitTask = async () => {
       duration: createForm.value.duration,
       aspect_ratio: createForm.value.aspect_ratio,
       group_title: createForm.value.group_title || 'Sora'
+    }
+    if (imageUrl) {
+      payload.image_url = imageUrl
     }
     if (mode === 'manual') {
       payload.profile_id = createForm.value.profile_id
