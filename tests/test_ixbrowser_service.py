@@ -166,6 +166,95 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scan_group_sora_sessions_silent_api_uses_httpx_when_token_present(monkeypatch):
+    service = IXBrowserService()
+
+    async def _fake_list_group_windows():
+        return [
+            IXBrowserGroupWindows(
+                id=1,
+                title="Sora",
+                window_count=2,
+                windows=[
+                    IXBrowserWindow(profile_id=11, name="win-11"),
+                    IXBrowserWindow(profile_id=12, name="win-12"),
+                ],
+            )
+        ]
+
+    async def _fake_list_opened_profile_ids():
+        return []
+
+    service.list_group_windows = _fake_list_group_windows
+    service._list_opened_profile_ids = _fake_list_opened_profile_ids
+
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_latest_ixbrowser_profile_session",
+        lambda _group, _pid: {"session_json": {"accessToken": "t"}},
+    )
+
+    async def _fake_fetch_session(token, *, proxy_url=None, user_agent=None):
+        del proxy_url, user_agent
+        assert token == "t"
+        return 200, {"user": {"email": "x@example.com"}, "accessToken": "t"}, "{\"ok\":true}"
+
+    async def _fake_fetch_sub(token, *, proxy_url=None, user_agent=None):
+        del proxy_url, user_agent
+        assert token == "t"
+        return {
+            "plan": "plus",
+            "status": 200,
+            "raw": "{\"data\":[]}",
+            "payload": {"data": [{"plan": {"id": "plus"}}]},
+            "error": None,
+            "source": "https://sora.chatgpt.com/backend/billing/subscriptions",
+        }
+
+    async def _fake_fetch_quota(token, *, proxy_url=None, user_agent=None):
+        del proxy_url, user_agent
+        assert token == "t"
+        return {
+            "remaining_count": 8,
+            "total_count": 8,
+            "reset_at": "2026-02-05T00:00:00+00:00",
+            "source": "https://sora.chatgpt.com/backend/nf/check",
+            "payload": {"ok": True},
+            "error": None,
+            "status": 200,
+            "raw": "{\"ok\":true}",
+        }
+
+    monkeypatch.setattr(service, "_fetch_sora_session_via_httpx", _fake_fetch_session, raising=True)
+    monkeypatch.setattr(service, "_fetch_sora_subscription_plan_via_httpx", _fake_fetch_sub, raising=True)
+    monkeypatch.setattr(service, "_fetch_sora_quota_via_httpx", _fake_fetch_quota, raising=True)
+
+    def _boom_playwright():
+        raise AssertionError("不应调用 async_playwright")
+
+    monkeypatch.setattr("app.services.ixbrowser_service.async_playwright", _boom_playwright)
+
+    async def _boom_scan(*_args, **_kwargs):
+        raise AssertionError("不应进入补扫（开窗）")
+
+    service._scan_single_window_via_browser = _boom_scan
+    service._save_scan_response = lambda *_args, **_kwargs: 101
+
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
+        lambda _run_id: {"scanned_at": "2026-02-04 12:00:00"},
+    )
+    service._apply_fallback_from_history = lambda _response: None
+
+    result = await service.scan_group_sora_sessions_silent_api(group_title="Sora", with_fallback=False)
+
+    assert result.group_title == "Sora"
+    assert result.total_windows == 2
+    assert result.success_count == 2
+    assert result.failed_count == 0
+    assert result.run_id == 101
+
+
+@pytest.mark.asyncio
 async def test_scan_group_sora_sessions_with_profile_ids_only_scans_selected(monkeypatch):
     service = IXBrowserService()
 
