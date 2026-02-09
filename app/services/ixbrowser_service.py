@@ -6404,17 +6404,53 @@ class IXBrowserService:
         return None
 
     async def _list_opened_profiles(self) -> List[dict]:
-        for path in ("/api/v2/profile-opened-list", "/api/v2/native-client-profile-opened-list"):
+        """
+        获取“当前可连接调试端口”的已打开窗口列表。
+
+        说明：
+        - `/api/v2/native-client-profile-opened-list` 才会返回 ws/debugging_port（当前机器真实已打开窗口）。
+        - `/api/v2/profile-opened-list` 在部分版本里仅返回“最近打开历史”（无 ws/port），不能用于判断当前打开状态。
+        因此这里会优先使用 native-client 列表，并且只保留包含 ws/debugging_address 的条目。
+        """
+        paths = (
+            "/api/v2/native-client-profile-opened-list",
+            "/api/v2/profile-opened-list",
+        )
+        normalized_items: List[dict] = []
+        seen: set[int] = set()
+
+        for path in paths:
             try:
                 data = await self._post(path, {})
-            except IXBrowserAPIError:
-                continue
-            except IXBrowserConnectionError:
+            except (IXBrowserAPIError, IXBrowserConnectionError):
                 continue
             items = self._unwrap_profile_list(data)
-            if items:
-                return items
-        return []
+            if not items:
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                normalized = self._normalize_opened_profile_data(item)
+                pid = normalized.get("profile_id")
+                if pid is None:
+                    pid = normalized.get("profileId") or normalized.get("id")
+                try:
+                    pid_int = int(pid) if pid is not None else 0
+                except (TypeError, ValueError):
+                    pid_int = 0
+                if pid_int <= 0 or pid_int in seen:
+                    continue
+                # 只保留“能连接”的打开窗口；无 ws/port 的条目（通常是历史记录）丢弃。
+                if not normalized.get("ws") and not normalized.get("debugging_address"):
+                    continue
+                seen.add(pid_int)
+                normalized_items.append(normalized)
+
+            # native-client 列表若已有结果，则无需再查历史列表，减少 ixBrowser 压力。
+            if normalized_items and path.endswith("native-client-profile-opened-list"):
+                break
+
+        return normalized_items
 
     def _unwrap_profile_list(self, data: Any) -> List[dict]:
         if not data:
