@@ -12,7 +12,7 @@ import re
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from uuid import uuid4
 
 import httpx
@@ -993,6 +993,325 @@ class IXBrowserService:
             "source": endpoint,
         }
 
+    def _normalize_proxy_type(self, value: Optional[str], default: str = "http") -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            text = str(default or "http").strip().lower()
+        if text in {"http", "https", "socks5", "ssh"}:
+            return text
+        if text in {"socks", "socks5h"}:
+            return "socks5"
+        return "http"
+
+    def _build_httpx_proxy_url_from_record(self, record: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(record, dict):
+            return None
+        ptype = self._normalize_proxy_type(record.get("proxy_type"), default="http")
+        if ptype == "ssh":
+            return None
+        ip = str(record.get("proxy_ip") or "").strip()
+        port = str(record.get("proxy_port") or "").strip()
+        if not ip or not port:
+            return None
+        user = str(record.get("proxy_user") or "")
+        password = str(record.get("proxy_password") or "")
+        auth = ""
+        if user or password:
+            auth = f"{quote(user)}:{quote(password)}@"
+        return f"{ptype}://{auth}{ip}:{port}"
+
+    def _mask_proxy_url(self, proxy_url: Optional[str]) -> Optional[str]:
+        if not isinstance(proxy_url, str) or not proxy_url.strip():
+            return None
+        text = proxy_url.strip()
+        return re.sub(r"://[^@/]+@", "://***:***@", text)
+
+    async def _sora_fetch_json_via_httpx(
+        self,
+        url: str,
+        *,
+        headers: Optional[Dict[str, str]] = None,
+        proxy_url: Optional[str] = None,
+        timeout_ms: int = 20_000,
+        retries: int = 2,
+    ) -> Dict[str, Any]:
+        """
+        通过服务端 HTTP 客户端发起请求（可指定代理），并解析 JSON。
+
+        注意：
+        - 该路径不会使用 ixBrowser 的浏览器网络栈，可能触发风控/Cloudflare。
+        - 仅在你明确选择“服务端直连（走代理）”策略时使用。
+        """
+        endpoint = str(url or "").strip()
+        if not endpoint:
+            return {"status": None, "raw": None, "json": None, "error": "缺少 url", "is_cf": False}
+
+        safe_headers: Dict[str, str] = {"Accept": "application/json"}
+        for key, value in (headers or {}).items():
+            k = str(key or "").strip()
+            if not k:
+                continue
+            v = "" if value is None else str(value)
+            safe_headers[k] = v
+
+        timeout_ms_int = int(timeout_ms) if int(timeout_ms or 0) > 0 else 20_000
+        retries_int = int(retries) if int(retries or 0) > 0 else 0
+
+        timeout = httpx.Timeout(timeout=timeout_ms_int / 1000.0)
+        last_result: Dict[str, Any] = {"status": None, "raw": None, "json": None, "error": None, "is_cf": False}
+
+        for attempt in range(retries_int + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=timeout,
+                    follow_redirects=False,
+                    http2=True,
+                    proxy=proxy_url,
+                    trust_env=False,
+                ) as client:
+                    resp = await client.get(endpoint, headers=safe_headers)
+                status_code = int(resp.status_code)
+                raw_text = resp.text if isinstance(resp.text, str) else None
+                parsed = None
+                try:
+                    parsed = resp.json()
+                except Exception:  # noqa: BLE001
+                    parsed = None
+                if not isinstance(parsed, (dict, list)):
+                    parsed = None
+                if raw_text and len(raw_text) > 20_000:
+                    raw_text = raw_text[:20_000]
+                lowered = (raw_text or "").lower()
+                is_cf = any(marker in lowered for marker in ("just a moment", "challenge-platform", "cf-mitigated", "cloudflare"))
+                last_result = {
+                    "status": status_code,
+                    "raw": raw_text,
+                    "json": parsed,
+                    "error": None,
+                    "is_cf": bool(is_cf),
+                }
+            except Exception as exc:  # noqa: BLE001
+                last_result = {"status": None, "raw": None, "json": None, "error": str(exc), "is_cf": False}
+
+            should_retry = False
+            if attempt < retries_int:
+                if last_result.get("error"):
+                    should_retry = True
+                elif last_result.get("is_cf"):
+                    should_retry = True
+                else:
+                    code = last_result.get("status")
+                    if code is None:
+                        should_retry = True
+                    else:
+                        try:
+                            code_int = int(code)
+                        except Exception:  # noqa: BLE001
+                            code_int = 0
+                        if code_int in (403, 408, 429) or code_int >= 500:
+                            should_retry = True
+
+            if not should_retry:
+                break
+
+            try:
+                await asyncio.sleep(1.0 * (2**attempt))
+            except Exception:  # noqa: BLE001
+                pass
+
+        return last_result
+
+    async def _request_sora_api_via_httpx(
+        self,
+        url: str,
+        access_token: str,
+        *,
+        proxy_url: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        endpoint = str(url or "").strip()
+        token = str(access_token or "").strip()
+        if not endpoint:
+            return {"status": None, "raw": None, "json": None, "error": "缺少 url", "source": ""}
+        if not token:
+            return {"status": None, "raw": None, "json": None, "error": "缺少 accessToken", "source": endpoint}
+
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Origin": "https://sora.chatgpt.com",
+            "Referer": "https://sora.chatgpt.com/",
+        }
+        if user_agent:
+            headers["User-Agent"] = str(user_agent)
+
+        result = await self._sora_fetch_json_via_httpx(
+            endpoint,
+            headers=headers,
+            proxy_url=proxy_url,
+            timeout_ms=20_000,
+            retries=2,
+        )
+        status = result.get("status")
+        raw_text = result.get("raw") if isinstance(result.get("raw"), str) else None
+        payload = result.get("json") if isinstance(result.get("json"), (dict, list)) else None
+        error = result.get("error")
+        if result.get("is_cf") or self._is_sora_cf_challenge(status if isinstance(status, int) else None, raw_text):
+            error = "cf_challenge"
+        return {
+            "status": int(status) if isinstance(status, int) else status,
+            "raw": raw_text,
+            "json": payload,
+            "error": str(error) if error else None,
+            "source": endpoint,
+        }
+
+    async def _fetch_sora_session_via_httpx(
+        self,
+        access_token: str,
+        *,
+        proxy_url: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Tuple[Optional[int], Optional[dict], Optional[str]]:
+        token = str(access_token or "").strip()
+        if not token:
+            return None, None, None
+
+        session_resp = await self._request_sora_api_via_httpx(
+            "https://sora.chatgpt.com/api/auth/session",
+            token,
+            proxy_url=proxy_url,
+            user_agent=user_agent,
+        )
+        session_status = session_resp.get("status")
+        session_payload = session_resp.get("json")
+        session_raw = session_resp.get("raw")
+
+        if int(session_status or 0) == 200 and isinstance(session_payload, dict):
+            session_obj = dict(session_payload)
+            if not self._extract_access_token(session_obj):
+                session_obj["accessToken"] = token
+            raw_text = (
+                session_raw
+                if isinstance(session_raw, str) and session_raw.strip()
+                else json.dumps(session_obj, ensure_ascii=False)
+            )
+            return int(session_status), session_obj, raw_text
+
+        me_resp = await self._request_sora_api_via_httpx(
+            "https://sora.chatgpt.com/backend/me",
+            token,
+            proxy_url=proxy_url,
+            user_agent=user_agent,
+        )
+        me_status = me_resp.get("status")
+        me_payload = me_resp.get("json")
+        if int(me_status or 0) == 200 and isinstance(me_payload, dict):
+            user_obj = me_payload.get("user") if isinstance(me_payload.get("user"), dict) else {}
+            user_obj = dict(user_obj) if isinstance(user_obj, dict) else {}
+            for field in ("email", "name", "id", "username"):
+                value = me_payload.get(field)
+                if value and field not in user_obj:
+                    user_obj[field] = value
+            session_obj2: Dict[str, Any] = {"accessToken": token, "user": user_obj}
+            for field in ("plan", "planType", "plan_type", "chatgpt_plan_type"):
+                if me_payload.get(field) is not None:
+                    session_obj2[field] = me_payload.get(field)
+            return 200, session_obj2, json.dumps(session_obj2, ensure_ascii=False)
+
+        status = int(session_status) if isinstance(session_status, int) else me_status
+        raw_text = session_raw if isinstance(session_raw, str) else None
+        return status, session_payload if isinstance(session_payload, dict) else None, raw_text
+
+    async def _fetch_sora_subscription_plan_via_httpx(
+        self,
+        access_token: str,
+        *,
+        proxy_url: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        result = await self._request_sora_api_via_httpx(
+            "https://sora.chatgpt.com/backend/billing/subscriptions",
+            access_token,
+            proxy_url=proxy_url,
+            user_agent=user_agent,
+        )
+        plan = None
+        payload = result.get("json")
+        if int(result.get("status") or 0) == 200 and isinstance(payload, dict):
+            items = payload.get("data")
+            if isinstance(items, list) and items:
+                first = items[0] if isinstance(items[0], dict) else None
+                plan_obj = first.get("plan") if isinstance(first, dict) and isinstance(first.get("plan"), dict) else {}
+                for value in (plan_obj.get("id"), plan_obj.get("title")):
+                    normalized = self._normalize_account_plan(value)
+                    if normalized:
+                        plan = normalized
+                        break
+        return {
+            "plan": plan,
+            "status": result.get("status"),
+            "raw": result.get("raw"),
+            "payload": payload if isinstance(payload, dict) else None,
+            "error": result.get("error"),
+            "source": result.get("source"),
+        }
+
+    async def _fetch_sora_quota_via_httpx(
+        self,
+        access_token: str,
+        *,
+        proxy_url: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        result = await self._request_sora_api_via_httpx(
+            "https://sora.chatgpt.com/backend/nf/check",
+            access_token,
+            proxy_url=proxy_url,
+            user_agent=user_agent,
+        )
+        payload = result.get("json")
+        status = result.get("status")
+        source = str(result.get("source") or "https://sora.chatgpt.com/backend/nf/check")
+
+        if result.get("error"):
+            return {
+                "remaining_count": None,
+                "total_count": None,
+                "reset_at": None,
+                "source": source,
+                "payload": payload if isinstance(payload, dict) else None,
+                "error": str(result.get("error")),
+                "status": status,
+                "raw": result.get("raw"),
+            }
+
+        if int(status or 0) != 200:
+            raw_text = result.get("raw")
+            detail = raw_text if isinstance(raw_text, str) and raw_text.strip() else "unknown error"
+            return {
+                "remaining_count": None,
+                "total_count": None,
+                "reset_at": None,
+                "source": source,
+                "payload": payload if isinstance(payload, dict) else None,
+                "error": f"nf/check 状态码 {status}: {str(detail)[:200]}",
+                "status": status,
+                "raw": raw_text,
+            }
+
+        parsed = self._parse_sora_nf_check(payload if isinstance(payload, dict) else {})
+        return {
+            "remaining_count": parsed.get("remaining_count"),
+            "total_count": parsed.get("total_count"),
+            "reset_at": parsed.get("reset_at"),
+            "source": source,
+            "payload": payload if isinstance(payload, dict) else None,
+            "error": None,
+            "status": status,
+            "raw": result.get("raw"),
+        }
+
     async def _fetch_sora_session_via_browser(
         self,
         page,
@@ -1172,7 +1491,32 @@ class IXBrowserService:
             except (TypeError, ValueError):
                 continue
 
-        async with async_playwright() as playwright:
+        proxy_by_id: Dict[int, dict] = {}
+        proxy_ids: List[int] = []
+        for w in target_windows:
+            try:
+                if w.proxy_local_id:
+                    proxy_ids.append(int(w.proxy_local_id))
+            except Exception:  # noqa: BLE001
+                continue
+        if proxy_ids:
+            try:
+                rows = sqlite_db.get_proxies_by_ids(proxy_ids)
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        pid = int(row.get("id") or 0)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if pid > 0:
+                        proxy_by_id[pid] = row
+            except Exception:  # noqa: BLE001
+                proxy_by_id = {}
+
+        playwright_cm = None
+        playwright = None
+        try:
             for idx, window in enumerate(target_windows, start=1):
                 await self._emit_scan_progress(
                     progress_callback,
@@ -1224,74 +1568,43 @@ class IXBrowserService:
                 if not access_token:
                     should_browser_fallback = True
                 else:
-                    browser = None
-                    opened_by_job = False
                     try:
-                        open_data: Optional[dict] = None
-                        try:
-                            open_data = await self._get_opened_profile(profile_id)
-                        except Exception:  # noqa: BLE001
-                            open_data = None
-
-                        if not open_data:
-                            logger.info("静默更新 | profile_id=%s | 打开窗口（优先 headless）", int(profile_id))
-                            open_started_at = time.perf_counter()
-                            open_data, _headless_used = await self._open_profile_silent(profile_id)
-                            open_cost_ms = int((time.perf_counter() - open_started_at) * 1000)
-                            logger.info(
-                                "静默更新 | profile_id=%s | 打开窗口完成 | headless=%s | 耗时=%sms",
-                                int(profile_id),
-                                bool(_headless_used),
-                                int(open_cost_ms),
-                            )
-                            opened_by_job = True
-                        else:
-                            logger.info("静默更新 | profile_id=%s | 复用已打开窗口（可连接调试端口）", int(profile_id))
-
-                        ws_endpoint = open_data.get("ws") if isinstance(open_data, dict) else None
-                        if not ws_endpoint and isinstance(open_data, dict):
-                            debugging_address = open_data.get("debugging_address")
-                            if debugging_address:
-                                ws_endpoint = f"http://{debugging_address}"
-                        if not ws_endpoint:
-                            raise IXBrowserConnectionError("打开窗口成功，但未返回调试地址（ws/debugging_address）")
-
-                        connect_started_at = time.perf_counter()
-                        browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=20_000)
-                        connect_cost_ms = int((time.perf_counter() - connect_started_at) * 1000)
+                        proxy_record = proxy_by_id.get(int(window.proxy_local_id or 0))
+                        proxy_url = self._build_httpx_proxy_url_from_record(proxy_record)
+                        if not proxy_url:
+                            # 兜底：若未能从本地 proxies 表取到账号代理（或无账号密码），则尝试直接使用 ixBrowser 透传的 ip:port。
+                            ptype = self._normalize_proxy_type(window.proxy_type, default="http")
+                            ip = str(window.proxy_ip or "").strip()
+                            port = str(window.proxy_port or "").strip()
+                            if ptype != "ssh" and ip and port:
+                                proxy_url = f"{ptype}://{ip}:{port}"
+                        masked_proxy = self._mask_proxy_url(proxy_url) or "无"
+                        user_agent = self._select_iphone_user_agent(profile_id)
                         logger.info(
-                            "静默更新 | profile_id=%s | 连接调试端口成功 | 耗时=%sms",
+                            "静默更新 | profile_id=%s | 使用服务端 API 请求（走代理） | proxy=%s",
                             int(profile_id),
-                            int(connect_cost_ms),
+                            masked_proxy,
                         )
-                        context = browser.contexts[0] if getattr(browser, "contexts", None) else await browser.new_context()
-                        page = context.pages[0] if getattr(context, "pages", None) else await context.new_page()
-
-                        try:
-                            await self._prepare_sora_page(page, profile_id)
-                        except Exception:  # noqa: BLE001
-                            pass
-
-                        try:
-                            goto_started_at = time.perf_counter()
-                            await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
-                            await page.wait_for_timeout(1200)
-                            goto_cost_ms = int((time.perf_counter() - goto_started_at) * 1000)
-                            logger.info(
-                                "静默更新 | profile_id=%s | 访问 Sora(drafts) 成功 | 耗时=%sms",
-                                int(profile_id),
-                                int(goto_cost_ms),
-                            )
-                        except PlaywrightTimeoutError as exc:
-                            raise IXBrowserConnectionError("访问 Sora drafts 超时") from exc
 
                         fetch_started_at = time.perf_counter()
-                        session_status, session_obj, session_raw = await self._fetch_sora_session_via_browser(page, access_token)
-                        subscription_info = await self._fetch_sora_subscription_plan_via_browser(page, access_token)
-                        quota_info = await self._fetch_sora_quota_via_browser(page, access_token)
+                        session_status, session_obj, session_raw = await self._fetch_sora_session_via_httpx(
+                            access_token,
+                            proxy_url=proxy_url,
+                            user_agent=user_agent,
+                        )
+                        subscription_info = await self._fetch_sora_subscription_plan_via_httpx(
+                            access_token,
+                            proxy_url=proxy_url,
+                            user_agent=user_agent,
+                        )
+                        quota_info = await self._fetch_sora_quota_via_httpx(
+                            access_token,
+                            proxy_url=proxy_url,
+                            user_agent=user_agent,
+                        )
                         fetch_cost_ms = int((time.perf_counter() - fetch_started_at) * 1000)
                         logger.info(
-                            "静默更新 | profile_id=%s | 拉取完成 | session=%s | subscriptions=%s | nf_check=%s | 耗时=%sms",
+                            "静默更新 | profile_id=%s | API 拉取完成 | session=%s | subscriptions=%s | nf_check=%s | 耗时=%sms",
                             int(profile_id),
                             session_status,
                             subscription_info.get("status"),
@@ -1312,63 +1625,11 @@ class IXBrowserService:
                             or is_cf(subscription_info.get("status"), subscription_info.get("raw"), subscription_info.get("error"))
                             or is_cf(quota_info.get("status"), quota_info.get("raw"), quota_info.get("error"))
                         )
-
                         if cf_challenge:
-                            # 轻量重试一次，让浏览器自行完成跳转/挑战页面加载（不做绕过）。
+                            should_browser_fallback = True
                             logger.warning(
-                                "静默更新 | profile_id=%s | 命中 Cloudflare 挑战页，等待并重试一次",
+                                "静默更新 | profile_id=%s | 服务端 API 命中 Cloudflare 挑战页（403），进入补扫",
                                 int(profile_id),
-                            )
-                            try:
-                                await page.wait_for_timeout(2500)
-                                await page.goto("https://sora.chatgpt.com/", wait_until="domcontentloaded", timeout=40_000)
-                                await page.wait_for_timeout(1200)
-                                await page.goto("https://sora.chatgpt.com/drafts", wait_until="domcontentloaded", timeout=40_000)
-                                await page.wait_for_timeout(1200)
-                            except Exception:  # noqa: BLE001
-                                pass
-
-                            session_status, session_obj, session_raw = await self._fetch_sora_session_via_browser(page, access_token)
-                            subscription_info = await self._fetch_sora_subscription_plan_via_browser(page, access_token)
-                            quota_info = await self._fetch_sora_quota_via_browser(page, access_token)
-                            cf_challenge = (
-                                is_cf(session_status, session_raw)
-                                or is_cf(subscription_info.get("status"), subscription_info.get("raw"), subscription_info.get("error"))
-                                or is_cf(quota_info.get("status"), quota_info.get("raw"), quota_info.get("error"))
-                            )
-                            logger.info(
-                                "静默更新 | profile_id=%s | 重试后状态 | session=%s | subscriptions=%s | nf_check=%s | cf=%s",
-                                int(profile_id),
-                                session_status,
-                                subscription_info.get("status"),
-                                quota_info.get("status"),
-                                bool(cf_challenge),
-                            )
-
-                        if cf_challenge:
-                            duration_ms = int((time.perf_counter() - started_at) * 1000)
-                            item = IXBrowserSessionScanItem(
-                                profile_id=profile_id,
-                                window_name=window.name,
-                                group_id=target.id,
-                                group_title=target.title,
-                                session_status=int(session_status) if isinstance(session_status, int) else None,
-                                session=session_obj if isinstance(session_obj, dict) else None,
-                                session_raw=session_raw if isinstance(session_raw, str) else None,
-                                quota_source=str(quota_info.get("source") or "https://sora.chatgpt.com/backend/nf/check"),
-                                quota_payload=quota_info.get("payload") if isinstance(quota_info.get("payload"), dict) else None,
-                                quota_error="命中 Cloudflare 挑战页（403），请手动打开窗口完成验证/登录后重试",
-                                proxy_mode=window.proxy_mode,
-                                proxy_id=window.proxy_id,
-                                proxy_type=window.proxy_type,
-                                proxy_ip=window.proxy_ip,
-                                proxy_port=window.proxy_port,
-                                real_ip=window.real_ip,
-                                proxy_local_id=window.proxy_local_id,
-                                success=False,
-                                close_success=True,
-                                error="cf_challenge",
-                                duration_ms=duration_ms,
                             )
                         else:
                             session_auth_failed = self._is_sora_token_auth_failure(
@@ -1433,39 +1694,6 @@ class IXBrowserService:
                                     subscription_info.get("status"),
                                     quota_info.get("status"),
                                 )
-                    except IXBrowserAPIError as exc:
-                        duration_ms = int((time.perf_counter() - started_at) * 1000)
-                        if int(getattr(exc, "code", -1) or -1) == 111003:
-                            err_text = (
-                                "窗口被标记为已打开（111003），可能在其他设备/实例打开或状态残留。"
-                                "请在 ixBrowser 客户端关闭该窗口后重试。"
-                            )
-                        else:
-                            err_text = str(exc)
-                        item = IXBrowserSessionScanItem(
-                            profile_id=profile_id,
-                            window_name=window.name,
-                            group_id=target.id,
-                            group_title=target.title,
-                            proxy_mode=window.proxy_mode,
-                            proxy_id=window.proxy_id,
-                            proxy_type=window.proxy_type,
-                            proxy_ip=window.proxy_ip,
-                            proxy_port=window.proxy_port,
-                            real_ip=window.real_ip,
-                            proxy_local_id=window.proxy_local_id,
-                            success=False,
-                            close_success=True,
-                            error=err_text,
-                            duration_ms=duration_ms,
-                        )
-                        logger.warning(
-                            "静默更新失败 | profile_id=%s | ixBrowser错误 code=%s | %s | 耗时=%sms",
-                            int(profile_id),
-                            getattr(exc, "code", None),
-                            err_text,
-                            int(duration_ms),
-                        )
                     except Exception as exc:  # noqa: BLE001
                         duration_ms = int((time.perf_counter() - started_at) * 1000)
                         item = IXBrowserSessionScanItem(
@@ -1486,37 +1714,17 @@ class IXBrowserService:
                             duration_ms=duration_ms,
                         )
                         logger.warning(
-                            "静默更新失败 | profile_id=%s | 错误=%s | 耗时=%sms",
+                            "静默更新失败 | profile_id=%s | 服务端 API 请求异常=%s | 耗时=%sms",
                             int(profile_id),
                             str(exc),
                             int(duration_ms),
                         )
-                    finally:
-                        if browser:
-                            try:
-                                await browser.close()
-                            except Exception:  # noqa: BLE001
-                                pass
-
-                        # 若本次任务打开了窗口，且后续不需要继续补扫，则按“尽量静默”的策略关闭窗口。
-                        if opened_by_job and not keep_profile_open and not should_browser_fallback:
-                            close_success = True
-                            try:
-                                close_success = await self._close_profile(profile_id)
-                            except Exception as close_exc:  # noqa: BLE001
-                                close_success = False
-                                if item is not None and not item.error:
-                                    item.error = f"窗口关闭失败：{close_exc}"
-                            if item is not None:
-                                item.close_success = bool(close_success)
-                            logger.info(
-                                "静默更新 | profile_id=%s | 关闭窗口%s",
-                                int(profile_id),
-                                "成功" if close_success else "失败",
-                            )
 
                 if should_browser_fallback:
                     logger.info("静默更新 | profile_id=%s | 进入补扫（将打开窗口抓取）", int(profile_id))
+                    if playwright is None:
+                        playwright_cm = async_playwright()
+                        playwright = await playwright_cm.__aenter__()
                     try:
                         item = await self._scan_single_window_via_browser(
                             playwright=playwright,
@@ -1605,6 +1813,12 @@ class IXBrowserService:
                         "run_id": None,
                     },
                 )
+        finally:
+            if playwright_cm is not None:
+                try:
+                    await playwright_cm.__aexit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
 
         final_results = [scanned_items[int(window.profile_id)] for window in target_windows]
         response = IXBrowserSessionScanResponse(
