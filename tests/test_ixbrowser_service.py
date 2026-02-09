@@ -398,6 +398,80 @@ async def test_scan_group_sora_sessions_with_profile_ids_without_history_keeps_p
 
 
 @pytest.mark.asyncio
+async def test_list_opened_profiles_prefers_native_client_and_filters_history():
+    service = IXBrowserService()
+    calls = []
+
+    async def _fake_post(path, payload):
+        calls.append(path)
+        if path == "/api/v2/native-client-profile-opened-list":
+            return {
+                "error": {"code": 0, "message": "success"},
+                "data": [
+                    {
+                        "profile_id": 36,
+                        "debugging_address": "127.0.0.1:2802",
+                        "ws": "ws://127.0.0.1:2802/devtools/browser/mock",
+                    }
+                ],
+            }
+        if path == "/api/v2/profile-opened-list":
+            return {
+                "error": {"code": 0, "message": "success"},
+                "data": [
+                    {
+                        "profile_id": 36,
+                        "last_opened_user": "masked@example.com",
+                        "last_opened_time": "2026-02-09 10:52:20",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected path: {path} payload={payload}")
+
+    service._post = _fake_post
+
+    opened = await service._get_opened_profile(36)
+    assert opened is not None
+    assert opened.get("ws") == "ws://127.0.0.1:2802/devtools/browser/mock"
+
+    ids = await service._list_opened_profile_ids()
+    assert ids == [36]
+
+    # native-client 有结果后应提前结束，不需要再去查“最近打开历史”列表。
+    assert "/api/v2/native-client-profile-opened-list" in calls
+    assert "/api/v2/profile-opened-list" not in calls
+
+
+@pytest.mark.asyncio
+async def test_list_opened_profiles_does_not_treat_history_as_opened():
+    service = IXBrowserService()
+
+    async def _fake_post(path, payload):
+        if path == "/api/v2/native-client-profile-opened-list":
+            return {"error": {"code": 0, "message": "success"}, "data": []}
+        if path == "/api/v2/profile-opened-list":
+            # 只有 last_opened_*，无 ws/debugging_address，应被过滤掉。
+            return {
+                "error": {"code": 0, "message": "success"},
+                "data": [
+                    {
+                        "profile_id": 18,
+                        "last_opened_user": "masked@example.com",
+                        "last_opened_time": "2026-02-09 10:16:55",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected path: {path} payload={payload}")
+
+    service._post = _fake_post
+
+    opened = await service._get_opened_profile(18)
+    assert opened is None
+    ids = await service._list_opened_profile_ids()
+    assert ids == []
+
+
+@pytest.mark.asyncio
 async def test_open_profile_window_group_not_found():
     service = IXBrowserService()
 
