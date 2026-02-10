@@ -1518,6 +1518,24 @@ class SQLiteDB:
         conn.close()
         return dict(row) if row else None
 
+    def get_sora_job_latest_by_root(self, root_job_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT *
+            FROM sora_jobs
+            WHERE id = ?
+               OR retry_root_job_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (int(root_job_id), int(root_job_id)),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
     def get_sora_job_latest_retry_child(self, parent_job_id: int) -> Optional[Dict[str, Any]]:
         conn = self._get_conn()
         cursor = conn.cursor()

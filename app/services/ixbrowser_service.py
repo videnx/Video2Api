@@ -2659,10 +2659,29 @@ class IXBrowserService:
         job = self.get_sora_job(job_id)
         return SoraJobCreateResponse(job=job)
 
-    def get_sora_job(self, job_id: int) -> SoraJob:
+    def get_sora_job(self, job_id: int, follow_retry: bool = False) -> SoraJob:
         row = sqlite_db.get_sora_job(job_id)
         if not row:
             raise IXBrowserNotFoundError(f"未找到任务：{job_id}")
+        if follow_retry:
+            try:
+                root_job_id = int(row.get("retry_root_job_id") or row.get("id") or job_id)
+            except Exception:
+                root_job_id = int(job_id)
+            latest_row = sqlite_db.get_sora_job_latest_by_root(root_job_id)
+            if latest_row:
+                try:
+                    latest_id = int(latest_row.get("id") or 0)
+                except Exception:
+                    latest_id = 0
+                try:
+                    current_id = int(row.get("id") or 0)
+                except Exception:
+                    current_id = 0
+                if latest_id and latest_id != current_id:
+                    latest_row = dict(latest_row)
+                    latest_row["resolved_from_job_id"] = int(job_id)
+                    row = latest_row
         return self._build_sora_job(row)
 
     def list_sora_jobs(
@@ -3103,6 +3122,10 @@ class IXBrowserService:
             dispatch_quantity_score=row.get("dispatch_quantity_score"),
             dispatch_quality_score=row.get("dispatch_quality_score"),
             dispatch_reason=row.get("dispatch_reason"),
+            retry_of_job_id=row.get("retry_of_job_id"),
+            retry_root_job_id=row.get("retry_root_job_id"),
+            retry_index=row.get("retry_index"),
+            resolved_from_job_id=row.get("resolved_from_job_id"),
             error=row.get("error"),
             proxy_mode=proxy_bind.get("proxy_mode"),
             proxy_id=proxy_bind.get("proxy_id"),

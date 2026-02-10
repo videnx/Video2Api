@@ -254,6 +254,7 @@ async def stream_sora_jobs(
 @router.get("/jobs/{job_id}", response_model=SoraJob)
 async def get_sora_job(
     job_id: int,
+    follow_retry: bool = Query(True, description="是否跟随重试链路"),
     current_user: dict = Depends(get_current_active_user),
 ):
     del current_user
@@ -261,7 +262,7 @@ async def get_sora_job(
         await ixbrowser_service.ensure_proxy_bindings()
     except Exception:  # noqa: BLE001
         pass
-    return ixbrowser_service.get_sora_job(job_id)
+    return ixbrowser_service.get_sora_job(job_id, follow_retry=follow_retry)
 
 
 @router.post("/jobs/{job_id}/retry", response_model=SoraJob)

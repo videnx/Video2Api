@@ -179,7 +179,7 @@ def test_create_video_unknown_model_fallback_defaults(monkeypatch, client):
 def test_get_video_by_numeric_id_success(monkeypatch, client):
     settings.video_api_bearer_token = "video-token"
 
-    def _fake_get(job_id: int):
+    def _fake_get(job_id: int, **_kwargs):
         assert job_id == 107
         return _mock_job(
             job_id=107,
@@ -209,7 +209,7 @@ def test_get_video_by_numeric_id_success(monkeypatch, client):
 def test_get_video_by_prefixed_id_success(monkeypatch, client):
     settings.video_api_bearer_token = "video-token"
 
-    def _fake_get(job_id: int):
+    def _fake_get(job_id: int, **_kwargs):
         assert job_id == 107
         return _mock_job(job_id=107, status="running", phase="publish", progress_pct=66)
 
@@ -227,7 +227,7 @@ def test_get_video_by_prefixed_id_success(monkeypatch, client):
 def test_get_video_failed_status_maps_progress_message(monkeypatch, client):
     settings.video_api_bearer_token = "video-token"
 
-    def _fake_get(_job_id: int):
+    def _fake_get(_job_id: int, **_kwargs):
         return _mock_job(status="failed", phase="submit", progress_pct=0, error="Sora生成超时，请检查")
 
     monkeypatch.setattr(ixbrowser_service, "get_sora_job", _fake_get, raising=True)
@@ -243,7 +243,7 @@ def test_get_video_failed_status_maps_progress_message(monkeypatch, client):
 def test_get_video_canceled_maps_to_failed(monkeypatch, client):
     settings.video_api_bearer_token = "video-token"
 
-    def _fake_get(_job_id: int):
+    def _fake_get(_job_id: int, **_kwargs):
         return _mock_job(status="canceled", phase="queue", progress_pct=0, error="任务已取消")
 
     monkeypatch.setattr(ixbrowser_service, "get_sora_job", _fake_get, raising=True)
@@ -266,7 +266,7 @@ def test_get_video_invalid_id_returns_400(client):
 def test_get_video_not_found_returns_404(monkeypatch, client):
     settings.video_api_bearer_token = "video-token"
 
-    def _fake_get(_job_id: int):
+    def _fake_get(_job_id: int, **_kwargs):
         raise IXBrowserNotFoundError("未找到任务：107")
 
     monkeypatch.setattr(ixbrowser_service, "get_sora_job", _fake_get, raising=True)

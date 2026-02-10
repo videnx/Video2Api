@@ -1378,6 +1378,59 @@ async def test_retry_sora_job_non_overload_keeps_old_behavior(monkeypatch):
     assert any(item[0] == old_job_id and item[2] == "retry" for item in job_events)
 
 
+def test_get_sora_job_follow_retry_returns_latest_child(monkeypatch):
+    service = IXBrowserService()
+    root_job_id = 10
+    child_job_id = 11
+
+    root_row = {
+        "id": root_job_id,
+        "profile_id": 1,
+        "group_title": "Sora",
+        "prompt": "hello",
+        "duration": "10s",
+        "aspect_ratio": "landscape",
+        "status": "failed",
+        "phase": "submit",
+        "retry_root_job_id": None,
+        "retry_index": 0,
+        "created_at": "2026-02-09 10:00:00",
+        "updated_at": "2026-02-09 10:00:00",
+    }
+    child_row = {
+        "id": child_job_id,
+        "profile_id": 2,
+        "group_title": "Sora",
+        "prompt": "hello",
+        "duration": "10s",
+        "aspect_ratio": "landscape",
+        "status": "completed",
+        "phase": "done",
+        "retry_of_job_id": root_job_id,
+        "retry_root_job_id": root_job_id,
+        "retry_index": 1,
+        "created_at": "2026-02-09 10:05:00",
+        "updated_at": "2026-02-09 10:10:00",
+    }
+
+    monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.get_sora_job", lambda job_id: root_row if int(job_id) == root_job_id else None)
+    monkeypatch.setattr(
+        "app.services.ixbrowser_service.sqlite_db.get_sora_job_latest_by_root",
+        lambda root_id: child_row if int(root_id) == root_job_id else None,
+    )
+
+    resolved = service.get_sora_job(root_job_id, follow_retry=True)
+    assert resolved.job_id == child_job_id
+    assert resolved.retry_root_job_id == root_job_id
+    assert resolved.retry_of_job_id == root_job_id
+    assert resolved.retry_index == 1
+    assert resolved.resolved_from_job_id == root_job_id
+
+    direct = service.get_sora_job(root_job_id, follow_retry=False)
+    assert direct.job_id == root_job_id
+    assert direct.resolved_from_job_id is None
+
+
 @pytest.mark.asyncio
 async def test_retry_sora_watermark_resets_state_and_schedules(monkeypatch):
     service = IXBrowserService()

@@ -244,5 +244,5 @@ async def get_video(
 ):
     _verify_video_api_token(authorization)
     job_id = _parse_video_job_id(video_id)
-    job = ixbrowser_service.get_sora_job(job_id)
+    job = ixbrowser_service.get_sora_job(job_id, follow_retry=True)
     return _build_video_detail_response(job)

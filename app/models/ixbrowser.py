@@ -234,6 +234,10 @@ class SoraJob(BaseModel):
     dispatch_quantity_score: Optional[float] = None
     dispatch_quality_score: Optional[float] = None
     dispatch_reason: Optional[str] = None
+    retry_of_job_id: Optional[int] = None
+    retry_root_job_id: Optional[int] = None
+    retry_index: Optional[int] = None
+    resolved_from_job_id: Optional[int] = None
     error: Optional[str] = None
     # 代理绑定（只读，按 ixBrowser 绑定关系）
     proxy_mode: Optional[int] = None
