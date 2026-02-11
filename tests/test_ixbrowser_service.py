@@ -2463,7 +2463,7 @@ async def test_cf_nav_listener_records_on_cdn_cgi_url(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_proxy_cf_event", _fake_create_proxy_cf_event)
-    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.to_thread", _fake_to_thread)
+    monkeypatch.setattr("app.services.ixbrowser.browser_prep.asyncio.to_thread", _fake_to_thread)
 
     class _FakeFrame:
         def __init__(self, url="about:blank"):
@@ -2515,7 +2515,7 @@ async def test_cf_nav_listener_records_on_just_a_moment_title(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_proxy_cf_event", _fake_create_proxy_cf_event)
-    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.to_thread", _fake_to_thread)
+    monkeypatch.setattr("app.services.ixbrowser.browser_prep.asyncio.to_thread", _fake_to_thread)
     monkeypatch.setattr("app.services.ixbrowser.browser_prep.CF_NAV_TITLE_CHECK_DELAY_SEC", 0.0)
 
     class _FakeFrame:
@@ -2567,7 +2567,7 @@ async def test_cf_nav_listener_dedupes_within_cooldown(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_proxy_cf_event", _fake_create_proxy_cf_event)
-    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.to_thread", _fake_to_thread)
+    monkeypatch.setattr("app.services.ixbrowser.browser_prep.asyncio.to_thread", _fake_to_thread)
 
     class _FakeFrame:
         def __init__(self, url="about:blank"):
