@@ -52,6 +52,92 @@ class GroupsMixin:
             return
         self._proxy_binding_last_failed_at = 0.0
 
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(float(text))
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _safe_str(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    async def _list_profiles(self) -> List[dict]:
+        """
+        获取全部窗口列表（自动翻页）
+        """
+        page = 1
+        limit = 200
+        total = None
+        profiles: List[dict] = []
+        seen_ids = set()
+
+        while total is None or len(profiles) < total:
+            payload = {
+                "profile_id": 0,
+                "name": "",
+                "group_id": 0,
+                "tag_id": 0,
+                "page": page,
+                "limit": limit,
+            }
+            data = await self._post("/api/v2/profile-list", payload)
+
+            data_section = data.get("data", {}) if isinstance(data, dict) else {}
+            if total is None:
+                total = int(data_section.get("total", 0) or 0)
+
+            page_items = data_section.get("data", [])
+            if not isinstance(page_items, list) or not page_items:
+                break
+
+            for item in page_items:
+                if not isinstance(item, dict):
+                    continue
+
+                profile_id = item.get("profile_id")
+                try:
+                    profile_id_int = int(profile_id)
+                except (TypeError, ValueError):
+                    continue
+
+                if profile_id_int in seen_ids:
+                    continue
+
+                seen_ids.add(profile_id_int)
+                profiles.append(
+                    {
+                        "profile_id": profile_id_int,
+                        "name": str(item.get("name") or f"窗口-{profile_id_int}"),
+                        "group_id": item.get("group_id"),
+                        "group_name": item.get("group_name"),
+                        "proxy_mode": self._safe_int(item.get("proxy_mode")),
+                        "proxy_id": self._safe_int(item.get("proxy_id")),
+                        "proxy_type": self._safe_str(item.get("proxy_type")),
+                        "proxy_ip": self._safe_str(item.get("proxy_ip")),
+                        "proxy_port": self._safe_str(item.get("proxy_port")),
+                        "real_ip": self._safe_str(item.get("real_ip")),
+                    }
+                )
+
+            # 保险兜底：接口 total 异常时，防止死循环
+            if len(page_items) < limit:
+                break
+            page += 1
+
+        return profiles
+
     async def list_groups(self) -> List[IXBrowserGroup]:
         """
         获取全部分组列表（自动翻页）

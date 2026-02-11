@@ -640,3 +640,101 @@ class SoraJobsMixin:
             parse_token=parse_token,
         )
 
+
+    def _build_sora_job(self, row: dict) -> SoraJob:
+        status = str(row.get("status") or "queued")
+        phase = str(row.get("phase") or "queue")
+        progress_pct = row.get("progress_pct")
+        if progress_pct is None:
+            progress_pct = 100 if status == "completed" else 0
+        publish_url = row.get("publish_url")
+        if publish_url and not self._sora_publish_workflow.is_valid_publish_url(publish_url):
+            publish_url = None
+        profile_id = int(row.get("profile_id") or 0)
+        proxy_bind = self.get_cached_proxy_binding(profile_id)
+        return SoraJob(
+            job_id=int(row["id"]),
+            profile_id=profile_id,
+            window_name=row.get("window_name"),
+            group_title=row.get("group_title"),
+            prompt=str(row.get("prompt") or ""),
+            image_url=row.get("image_url"),
+            duration=str(row.get("duration") or "10s"),
+            aspect_ratio=str(row.get("aspect_ratio") or "landscape"),
+            status=status,
+            phase=phase,
+            progress_pct=float(progress_pct) if progress_pct is not None else None,
+            task_id=row.get("task_id"),
+            generation_id=row.get("generation_id"),
+            publish_url=publish_url,
+            publish_post_id=row.get("publish_post_id"),
+            publish_permalink=row.get("publish_permalink"),
+            watermark_status=row.get("watermark_status"),
+            watermark_url=row.get("watermark_url"),
+            watermark_error=row.get("watermark_error"),
+            watermark_attempts=row.get("watermark_attempts"),
+            watermark_started_at=row.get("watermark_started_at"),
+            watermark_finished_at=row.get("watermark_finished_at"),
+            dispatch_mode=row.get("dispatch_mode"),
+            dispatch_score=row.get("dispatch_score"),
+            dispatch_quantity_score=row.get("dispatch_quantity_score"),
+            dispatch_quality_score=row.get("dispatch_quality_score"),
+            dispatch_reason=row.get("dispatch_reason"),
+            retry_of_job_id=row.get("retry_of_job_id"),
+            retry_root_job_id=row.get("retry_root_job_id"),
+            retry_index=row.get("retry_index"),
+            resolved_from_job_id=row.get("resolved_from_job_id"),
+            error=row.get("error"),
+            proxy_mode=proxy_bind.get("proxy_mode"),
+            proxy_id=proxy_bind.get("proxy_id"),
+            proxy_type=proxy_bind.get("proxy_type"),
+            proxy_ip=proxy_bind.get("proxy_ip"),
+            proxy_port=proxy_bind.get("proxy_port"),
+            real_ip=proxy_bind.get("real_ip"),
+            proxy_local_id=proxy_bind.get("proxy_local_id"),
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+            created_at=str(row.get("created_at")),
+            updated_at=str(row.get("updated_at")),
+            operator_username=row.get("operator_username"),
+        )
+
+    def _build_generate_job(self, row: dict) -> IXBrowserGenerateJob:
+        status = str(row.get("status") or "queued")
+        progress = row.get("progress")
+        if progress is None:
+            progress = 100 if status == "completed" else 0
+        elif status == "completed" and int(progress) < 100:
+            progress = 100
+        publish_url = row.get("publish_url")
+        if publish_url and not self._sora_publish_workflow.is_valid_publish_url(publish_url):
+            publish_url = None
+        return IXBrowserGenerateJob(
+            job_id=int(row["id"]),
+            profile_id=int(row["profile_id"]),
+            window_name=row.get("window_name"),
+            group_title=str(row.get("group_title") or "Sora"),
+            prompt=str(row.get("prompt") or ""),
+            duration=str(row.get("duration") or "10s"),
+            aspect_ratio=str(row.get("aspect_ratio") or "landscape"),
+            status=status,
+            progress=progress,
+            publish_status=row.get("publish_status"),
+            publish_url=publish_url,
+            publish_post_id=row.get("publish_post_id"),
+            publish_permalink=row.get("publish_permalink"),
+            publish_error=row.get("publish_error"),
+            publish_attempts=row.get("publish_attempts"),
+            published_at=row.get("published_at"),
+            task_id=row.get("task_id"),
+            task_url=row.get("task_url"),
+            generation_id=row.get("generation_id"),
+            error=row.get("error"),
+            elapsed_ms=row.get("elapsed_ms"),
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+            created_at=str(row.get("created_at") or ""),
+            updated_at=str(row.get("updated_at") or ""),
+            operator_username=row.get("operator_username"),
+        )
+
