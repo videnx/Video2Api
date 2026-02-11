@@ -691,6 +691,7 @@ class SoraNurtureService:
         except Exception:  # noqa: BLE001
             pass
         await self._ix._apply_request_blocking(page)  # noqa: SLF001
+        await self._ix._attach_cf_nav_listener(page, profile_id)  # noqa: SLF001
 
     async def _check_logged_in(self, page) -> Tuple[bool, str]:
         data = await page.evaluate(

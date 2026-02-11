@@ -44,6 +44,11 @@ from app.services.task_runtime import spawn
 
 logger = logging.getLogger(__name__)
 
+CF_NAV_LISTENER_TTL_SEC = 60
+CF_NAV_RECORD_COOLDOWN_SEC = 20
+CF_NAV_TITLE_CHECK_DELAY_SEC = 0.2
+CF_NAV_TITLE_MARKERS = ("just a moment", "challenge-platform", "cloudflare")
+
 IPHONE_OS_VERSIONS = [
     "16_0",
     "16_1",
@@ -132,6 +137,9 @@ class IXBrowserService:
         self._profile_proxy_map: Dict[int, Dict[str, Any]] = {}
         # profile_id -> oai-did（用于 curl-cffi 静默更新请求，减少 CF 风控）
         self._oai_did_by_profile: Dict[int, str] = {}
+        # profile_id -> last nav CF record time/url（用于短时间窗口内去重，避免并发写库风暴）
+        self._cf_nav_last_record_at: Dict[int, float] = {}
+        self._cf_nav_last_record_url: Dict[int, str] = {}
         self._proxy_binding_last_failed_at: float = 0.0
         self._realtime_quota_cache_ttl: float = 30.0
         self._realtime_operator_username: str = "实时使用"
@@ -3215,11 +3223,146 @@ class IXBrowserService:
         except Exception:  # noqa: BLE001
             pass
 
+    def _should_record_cf_nav_event(self, profile_id: int, url: str) -> bool:
+        """
+        去重策略：
+        - 同 profile 在 cooldown 秒内只记 1 次（防止多次 redirect/并发造成事件风暴）
+        - 同 URL 重复不记（即使超过 cooldown）
+        """
+        try:
+            pid = int(profile_id or 0)
+        except Exception:
+            pid = 0
+        if pid <= 0:
+            return False
+        endpoint = str(url or "").strip()
+        now = time.monotonic()
+        last_at = float(self._cf_nav_last_record_at.get(pid) or 0.0)
+        if last_at and (now - last_at) < float(CF_NAV_RECORD_COOLDOWN_SEC):
+            return False
+        last_url = self._cf_nav_last_record_url.get(pid)
+        if last_url and last_url == endpoint:
+            return False
+        self._cf_nav_last_record_at[pid] = now
+        self._cf_nav_last_record_url[pid] = endpoint
+        return True
+
+    async def _handle_cf_nav_framenavigated(self, *, page, profile_id: int, url: str) -> None:
+        try:
+            deadline = float(getattr(page, "_cf_nav_listener_deadline", 0.0) or 0.0)
+        except Exception:
+            deadline = 0.0
+        if deadline and time.monotonic() > deadline:
+            return
+
+        endpoint = str(url or "").strip()
+        lowered = endpoint.lower()
+        if "/cdn-cgi/" in lowered or "challenge-platform" in lowered or "__cf_chl_" in lowered:
+            is_challenge = True
+        else:
+            # 部分 CF 挑战 URL 不明显（或短暂保持原 URL），补一次 title 判定。
+            try:
+                await asyncio.sleep(float(CF_NAV_TITLE_CHECK_DELAY_SEC))
+            except Exception:  # noqa: BLE001
+                return
+            title = ""
+            try:
+                title = str(await page.title() or "")
+            except Exception:  # noqa: BLE001
+                title = ""
+            title_lower = title.lower()
+            is_challenge = any(marker in title_lower for marker in CF_NAV_TITLE_MARKERS)
+
+        if not is_challenge:
+            return
+
+        if not self._should_record_cf_nav_event(profile_id, endpoint):
+            return
+
+        spawn(
+            asyncio.to_thread(
+                self._record_proxy_cf_event,
+                profile_id=profile_id,
+                source="page_nav",
+                endpoint=endpoint,
+                status=None,
+                error="cf_challenge",
+                is_cf=True,
+                assume_proxy_chain=True,
+            ),
+            task_name="ixbrowser.cf_nav.record",
+            metadata={
+                "profile_id": int(profile_id),
+                "endpoint": endpoint[:200],
+            },
+        )
+
+    async def _attach_cf_nav_listener(self, page, profile_id: int) -> None:
+        """
+        在页面准备阶段挂一个短时导航监听器，用于捕获“刚打开就跳 CF 挑战页”的场景。
+
+        只在命中挑战时写入 `proxy_cf_events`（source=page_nav, is_cf=1）。
+        """
+        try:
+            if bool(getattr(page, "_cf_nav_listener_attached", False)):
+                return
+        except Exception:  # noqa: BLE001
+            # page 对象异常时，直接跳过（不影响主流程）
+            return
+
+        try:
+            setattr(page, "_cf_nav_listener_attached", True)
+            setattr(page, "_cf_nav_listener_deadline", time.monotonic() + float(CF_NAV_LISTENER_TTL_SEC))
+        except Exception:  # noqa: BLE001
+            # 监听器状态写不进去时，为避免重复注册，直接放弃挂载。
+            return
+
+        def _on_framenavigated(frame) -> None:
+            # 监听器回调必须尽快返回：仅做轻量过滤 + spawn 后台任务
+            try:
+                deadline = float(getattr(page, "_cf_nav_listener_deadline", 0.0) or 0.0)
+            except Exception:
+                deadline = 0.0
+            if deadline and time.monotonic() > deadline:
+                return
+
+            # 只关心主 frame 的导航（避免 iframe 噪声）
+            try:
+                if frame != getattr(page, "main_frame", None):
+                    return
+            except Exception:  # noqa: BLE001
+                try:
+                    if getattr(frame, "parent_frame", None) is not None:
+                        return
+                except Exception:  # noqa: BLE001
+                    return
+
+            try:
+                url = str(getattr(frame, "url", "") or "")
+            except Exception:  # noqa: BLE001
+                url = ""
+
+            lowered = url.lower()
+            if "sora.chatgpt.com" not in lowered and "cdn-cgi/challenge-platform" not in lowered:
+                return
+
+            spawn(
+                self._handle_cf_nav_framenavigated(page=page, profile_id=int(profile_id), url=url),
+                task_name="ixbrowser.cf_nav.detect",
+                metadata={"profile_id": int(profile_id), "url": url[:200]},
+            )
+
+        try:
+            page.on("framenavigated", _on_framenavigated)
+        except Exception:  # noqa: BLE001
+            return
+
     async def _prepare_sora_page(self, page, profile_id: int) -> None:
         user_agent = self._select_iphone_user_agent(profile_id)
         await self._apply_ua_override(page, user_agent)
         await self._apply_request_blocking(page)
         await self._attach_realtime_quota_listener(page, profile_id, "Sora")
+        await self._attach_cf_nav_listener(page, profile_id)
 
     def _register_realtime_subscriber(self) -> asyncio.Queue:
         return self._realtime_quota_service.register_subscriber()

@@ -2457,3 +2457,159 @@ async def test_run_sora_submit_and_progress_not_finished_by_pending_missing(monk
     assert task_id == "task_1"
     assert generation_id == "gen_1"
     assert submit_kwargs.get("image_url") == "https://example.com/submit.png"
+
+
+@pytest.mark.asyncio
+async def test_cf_nav_listener_records_on_cdn_cgi_url(monkeypatch):
+    service = IXBrowserService()
+
+    calls = []
+    done = asyncio.Event()
+
+    def _fake_create_proxy_cf_event(**kwargs):
+        calls.append(dict(kwargs))
+        done.set()
+        return 1
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_proxy_cf_event", _fake_create_proxy_cf_event)
+    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.to_thread", _fake_to_thread)
+
+    class _FakeFrame:
+        def __init__(self, url="about:blank"):
+            self.url = url
+            self.parent_frame = None
+
+    class _FakePage:
+        def __init__(self, title_text=""):
+            self._handlers = {}
+            self._title_text = title_text
+            self.main_frame = _FakeFrame()
+
+        def on(self, event, cb):
+            self._handlers.setdefault(str(event), []).append(cb)
+
+        async def title(self):
+            return self._title_text
+
+        def emit(self, event, arg):
+            for cb in self._handlers.get(str(event), []):
+                cb(arg)
+
+    page = _FakePage(title_text="Sora")
+    await service._attach_cf_nav_listener(page, profile_id=77)  # noqa: SLF001
+    page.main_frame.url = "https://sora.chatgpt.com/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page"
+    page.emit("framenavigated", page.main_frame)
+    await asyncio.wait_for(done.wait(), timeout=1)
+
+    assert len(calls) == 1
+    assert calls[0]["profile_id"] == 77
+    assert calls[0]["source"] == "page_nav"
+    assert calls[0]["is_cf"] is True
+    assert "cdn-cgi" in str(calls[0]["endpoint"])
+
+
+@pytest.mark.asyncio
+async def test_cf_nav_listener_records_on_just_a_moment_title(monkeypatch):
+    service = IXBrowserService()
+
+    calls = []
+    done = asyncio.Event()
+
+    def _fake_create_proxy_cf_event(**kwargs):
+        calls.append(dict(kwargs))
+        done.set()
+        return 1
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_proxy_cf_event", _fake_create_proxy_cf_event)
+    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.to_thread", _fake_to_thread)
+    monkeypatch.setattr("app.services.ixbrowser_service.CF_NAV_TITLE_CHECK_DELAY_SEC", 0.0)
+
+    class _FakeFrame:
+        def __init__(self, url="about:blank"):
+            self.url = url
+            self.parent_frame = None
+
+    class _FakePage:
+        def __init__(self, title_text=""):
+            self._handlers = {}
+            self._title_text = title_text
+            self.main_frame = _FakeFrame()
+
+        def on(self, event, cb):
+            self._handlers.setdefault(str(event), []).append(cb)
+
+        async def title(self):
+            return self._title_text
+
+        def emit(self, event, arg):
+            for cb in self._handlers.get(str(event), []):
+                cb(arg)
+
+    page = _FakePage(title_text="Just a moment...")
+    await service._attach_cf_nav_listener(page, profile_id=77)  # noqa: SLF001
+    page.main_frame.url = "https://sora.chatgpt.com/drafts"
+    page.emit("framenavigated", page.main_frame)
+    await asyncio.wait_for(done.wait(), timeout=1)
+
+    assert len(calls) == 1
+    assert calls[0]["profile_id"] == 77
+    assert calls[0]["source"] == "page_nav"
+    assert calls[0]["is_cf"] is True
+
+
+@pytest.mark.asyncio
+async def test_cf_nav_listener_dedupes_within_cooldown(monkeypatch):
+    service = IXBrowserService()
+
+    calls = []
+    done = asyncio.Event()
+
+    def _fake_create_proxy_cf_event(**kwargs):
+        calls.append(dict(kwargs))
+        done.set()
+        return 1
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("app.services.ixbrowser_service.sqlite_db.create_proxy_cf_event", _fake_create_proxy_cf_event)
+    monkeypatch.setattr("app.services.ixbrowser_service.asyncio.to_thread", _fake_to_thread)
+
+    class _FakeFrame:
+        def __init__(self, url="about:blank"):
+            self.url = url
+            self.parent_frame = None
+
+    class _FakePage:
+        def __init__(self):
+            self._handlers = {}
+            self.main_frame = _FakeFrame()
+
+        def on(self, event, cb):
+            self._handlers.setdefault(str(event), []).append(cb)
+
+        async def title(self):
+            return "Sora"
+
+        def emit(self, event, arg):
+            for cb in self._handlers.get(str(event), []):
+                cb(arg)
+
+    page = _FakePage()
+    await service._attach_cf_nav_listener(page, profile_id=88)  # noqa: SLF001
+
+    page.main_frame.url = "https://sora.chatgpt.com/cdn-cgi/challenge-platform/h/g/first"
+    page.emit("framenavigated", page.main_frame)
+    page.main_frame.url = "https://sora.chatgpt.com/cdn-cgi/challenge-platform/h/g/second"
+    page.emit("framenavigated", page.main_frame)
+    await asyncio.wait_for(done.wait(), timeout=1)
+    # 给后台任务一个调度 tick，确保不会晚到第二次写入
+    await asyncio.sleep(0)
+
+    assert len(calls) == 1
