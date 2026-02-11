@@ -2,17 +2,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.encoders import jsonable_encoder
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from jose import JWTError, jwt
 
 from app.core.auth import get_current_active_user
-from app.core.config import settings
+from app.core.sse import format_sse_event
+from app.core.stream_auth import require_user_from_query_token
 from app.db.sqlite import sqlite_db
 from app.models.logs import LogEventListResponse, LogEventStatsResponse
 from app.models.settings import (
@@ -136,16 +134,7 @@ async def stream_system_logs(
     source: str = Query("all", description="日志来源过滤"),
     token: Optional[str] = Query(None, description="访问令牌"),
 ):
-    if not token:
-        raise HTTPException(status_code=401, detail="缺少访问令牌")
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        username = payload.get("sub")
-    except JWTError as exc:
-        raise HTTPException(status_code=401, detail="无效的访问令牌") from exc
-
-    if not username or not sqlite_db.get_user_by_username(username):
-        raise HTTPException(status_code=401, detail="无效的访问令牌")
+    require_user_from_query_token(token)
 
     source_value = str(source or "all").strip().lower() or "all"
 
@@ -168,8 +157,7 @@ async def stream_system_logs(
                         row_id = int(row.get("id") or 0)
                         if row_id > last_id:
                             last_id = row_id
-                        payload_json = json.dumps(jsonable_encoder(row), ensure_ascii=False)
-                        yield f"event: log\ndata: {payload_json}\n\n"
+                        yield format_sse_event("log", row)
                     continue
 
                 idle_ticks += 1

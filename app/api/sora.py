@@ -1,17 +1,14 @@
 import asyncio
-import json
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.encoders import jsonable_encoder
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from jose import JWTError, jwt
 
 from app.core.audit import log_audit
 from app.core.auth import get_current_active_user
-from app.core.config import settings
-from app.db.sqlite import sqlite_db
+from app.core.sse import format_sse_event
+from app.core.stream_auth import require_user_from_query_token
 from app.models.ixbrowser import (
     SoraAccountWeight,
     SoraJob,
@@ -151,11 +148,6 @@ async def list_sora_jobs(
     )
 
 
-def _format_sse_event(event: str, data: object) -> str:
-    payload_json = json.dumps(jsonable_encoder(data), ensure_ascii=False)
-    return f"event: {event}\ndata: {payload_json}\n\n"
-
-
 @router.get("/jobs/stream")
 async def stream_sora_jobs(
     token: Optional[str] = Query(None, description="访问令牌"),
@@ -167,16 +159,7 @@ async def stream_sora_jobs(
     limit: int = Query(100, ge=1, le=200, description="返回条数"),
     with_events: bool = Query(True, description="是否推送阶段事件"),
 ):
-    if not token:
-        raise HTTPException(status_code=401, detail="缺少访问令牌")
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        username = payload.get("sub")
-    except JWTError as exc:
-        raise HTTPException(status_code=401, detail="无效的访问令牌") from exc
-
-    if not username or not sqlite_db.get_user_by_username(username):
-        raise HTTPException(status_code=401, detail="无效的访问令牌")
+    require_user_from_query_token(token)
 
     try:
         await ixbrowser_service.ensure_proxy_bindings()
@@ -202,7 +185,7 @@ async def stream_sora_jobs(
             last_phase_event_id = sora_job_stream_service.get_latest_phase_event_id() if with_events else 0
             last_emit_at = time.monotonic()
             snapshot_payload = sora_job_stream_service.build_snapshot_payload(snapshot_jobs)
-            yield _format_sse_event("snapshot", snapshot_payload)
+            yield format_sse_event("snapshot", snapshot_payload)
 
             while True:
                 await asyncio.sleep(poll_interval)
@@ -214,10 +197,10 @@ async def stream_sora_jobs(
                     latest_jobs,
                 )
                 for item in changed_jobs:
-                    yield _format_sse_event("job", item)
+                    yield format_sse_event("job", item)
                     has_output = True
                 for removed_job_id in removed_job_ids:
-                    yield _format_sse_event("remove", {"job_id": int(removed_job_id)})
+                    yield format_sse_event("remove", {"job_id": int(removed_job_id)})
                     has_output = True
 
                 if with_events:
@@ -227,7 +210,7 @@ async def stream_sora_jobs(
                         limit=int(sora_job_stream_service.phase_poll_limit),
                     )
                     for event in phase_events:
-                        yield _format_sse_event("phase", event)
+                        yield format_sse_event("phase", event)
                         has_output = True
 
                 now = time.monotonic()

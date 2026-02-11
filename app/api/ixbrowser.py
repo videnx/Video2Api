@@ -1,18 +1,15 @@
 """ixBrowser 业务接口"""
 import asyncio
-import json
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from fastapi.encoders import jsonable_encoder
+from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from jose import JWTError, jwt
 
 from app.core.audit import log_audit
 from app.core.auth import get_current_active_user
-from app.core.config import settings
-from app.db.sqlite import sqlite_db
+from app.core.sse import format_sse_event
+from app.core.stream_auth import require_user_from_query_token
 from app.models.ixbrowser import (
     IXBrowserGenerateJob,
     IXBrowserGenerateJobCreateResponse,
@@ -31,25 +28,6 @@ from app.services.ixbrowser_service import (
 )
 
 router = APIRouter(prefix="/api/v1/ixbrowser", tags=["ixBrowser"])
-
-
-def _format_sse_event(event: str, data: object) -> str:
-    payload_json = json.dumps(jsonable_encoder(data), ensure_ascii=False)
-    return f"event: {event}\ndata: {payload_json}\n\n"
-
-
-def _decode_stream_token(token: Optional[str]) -> str:
-    if not token:
-        raise HTTPException(status_code=401, detail="缺少访问令牌")
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        username = payload.get("sub")
-    except JWTError as exc:
-        raise HTTPException(status_code=401, detail="无效的访问令牌") from exc
-    if not username or not sqlite_db.get_user_by_username(username):
-        raise HTTPException(status_code=401, detail="无效的访问令牌")
-    return str(username)
-
 
 def _silent_refresh_payload(job: IXBrowserSilentRefreshJob) -> dict:
     return {
@@ -251,7 +229,7 @@ async def stream_sora_session_accounts_silent_refresh(
     job_id: int = Query(..., ge=1, description="静默更新任务 ID"),
     token: Optional[str] = Query(None, description="访问令牌"),
 ):
-    _decode_stream_token(token)
+    require_user_from_query_token(token)
     initial_job = ixbrowser_service.get_silent_refresh_job(job_id)
 
     poll_interval = 1.0
@@ -270,9 +248,9 @@ async def stream_sora_session_accounts_silent_refresh(
             initial_job.error,
         )
         snapshot_payload = _silent_refresh_payload(initial_job)
-        yield _format_sse_event("snapshot", snapshot_payload)
+        yield format_sse_event("snapshot", snapshot_payload)
         if initial_job.status in {"completed", "failed"}:
-            yield _format_sse_event("done", snapshot_payload)
+            yield format_sse_event("done", snapshot_payload)
             return
 
         while True:
@@ -292,7 +270,7 @@ async def stream_sora_session_accounts_silent_refresh(
             now = time.monotonic()
             if fingerprint != last_fingerprint:
                 event_name = "done" if job.status in {"completed", "failed"} else "progress"
-                yield _format_sse_event(event_name, payload)
+                yield format_sse_event(event_name, payload)
                 last_fingerprint = fingerprint
                 last_emit_at = now
                 if event_name == "done":
@@ -342,7 +320,7 @@ async def stream_sora_session_accounts(
     group_title: str = Query("Sora", description="分组名称"),
     token: Optional[str] = Query(None, description="访问令牌"),
 ):
-    _decode_stream_token(token)
+    require_user_from_query_token(token)
 
     queue = ixbrowser_service.register_realtime_subscriber()
 
@@ -367,8 +345,7 @@ async def stream_sora_session_accounts(
                 except Exception:  # noqa: BLE001
                     pass
                 data = _apply_profile_proxy_binding(data)
-                payload_json = json.dumps(jsonable_encoder(data), ensure_ascii=False)
-                yield f"event: update\\ndata: {payload_json}\\n\\n"
+                yield format_sse_event("update", data)
         finally:
             ixbrowser_service.unregister_realtime_subscriber(queue)
 
