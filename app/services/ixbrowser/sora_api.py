@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -62,6 +62,56 @@ class SoraApiMixin:
             "error": str(error) if error else None,
             "source": endpoint,
         }
+
+    def _is_sora_cf_challenge(self, status: Optional[int], raw: Optional[str]) -> bool:
+        try:
+            status_int = int(status) if status is not None else None
+        except Exception:  # noqa: BLE001
+            status_int = None
+        if status_int != 403:
+            return False
+        if not isinstance(raw, str) or not raw.strip():
+            return False
+        lowered = raw.lower()
+        markers = ("just a moment", "challenge-platform", "cf-mitigated", "cloudflare")
+        return any(marker in lowered for marker in markers)
+
+    def _is_sora_token_auth_failure(
+        self,
+        status: Optional[int],
+        raw: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if status in (401, 403):
+            return True
+
+        candidate_texts: List[str] = []
+        if isinstance(raw, str) and raw.strip():
+            candidate_texts.append(raw.strip().lower())
+        if isinstance(payload, dict):
+            try:
+                candidate_texts.append(json.dumps(payload, ensure_ascii=False).lower())
+            except Exception:  # noqa: BLE001
+                pass
+            error_obj = payload.get("error")
+            if isinstance(error_obj, dict):
+                code = str(error_obj.get("code") or "").strip().lower()
+                message = str(error_obj.get("message") or "").strip().lower()
+                if code in {"token_expired", "invalid_token", "token_invalid"}:
+                    return True
+                if "token expired" in message or "invalid token" in message:
+                    return True
+
+        markers = (
+            "token_expired",
+            "token expired",
+            "invalid token",
+            "invalid_token",
+        )
+        for text in candidate_texts:
+            if any(marker in text for marker in markers):
+                return True
+        return False
 
     def _normalize_proxy_type(self, value: Optional[str], default: str = "http") -> str:
         text = str(value or "").strip().lower()
@@ -864,4 +914,3 @@ class SoraApiMixin:
             "status": status,
             "raw": result.get("raw"),
         }
-

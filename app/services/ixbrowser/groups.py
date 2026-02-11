@@ -220,3 +220,22 @@ class GroupsMixin:
             return self._group_windows_cache
         return await self.list_group_windows()
 
+    def _find_group_by_title(self, groups: List[IXBrowserGroupWindows], group_title: str) -> Optional[IXBrowserGroupWindows]:
+        normalized = str(group_title or "").strip().lower()
+        for group in groups:
+            if str(group.title or "").strip().lower() == normalized:
+                return group
+        return None
+
+    async def _get_window_from_sora_group(self, profile_id: int) -> Optional[IXBrowserWindow]:
+        return await self._get_window_from_group(profile_id, "Sora")
+
+    async def _get_window_from_group(self, profile_id: int, group_title: str) -> Optional[IXBrowserWindow]:
+        groups = await self.list_group_windows_cached(max_age_sec=3.0)
+        target_group = self._find_group_by_title(groups, group_title)
+        if not target_group:
+            return None
+        for window in target_group.windows:
+            if int(window.profile_id) == int(profile_id):
+                return window
+        return None
