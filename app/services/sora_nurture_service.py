@@ -20,6 +20,7 @@ from app.services.ixbrowser_service import (
     IXBrowserServiceError,
     ixbrowser_service,
 )
+from app.services.nurture.errors import SoraNurtureServiceError
 from app.services.task_runtime import spawn
 
 logger = logging.getLogger(__name__)
@@ -49,10 +50,6 @@ def _safe_json_loads(text: Optional[str]) -> Any:
         return json.loads(text)
     except Exception:  # noqa: BLE001
         return None
-
-
-class SoraNurtureServiceError(Exception):
-    """养号服务通用异常"""
 
 
 class SoraNurtureService:

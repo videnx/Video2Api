@@ -11,13 +11,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.db.sqlite import sqlite_db
-from app.services.ixbrowser_service import (
+from app.services.ixbrowser.errors import (
     IXBrowserAPIError,
     IXBrowserConnectionError,
     IXBrowserNotFoundError,
     IXBrowserServiceError,
 )
-from app.services.sora_nurture_service import SoraNurtureServiceError
+from app.services.nurture.errors import SoraNurtureServiceError
 
 logger = logging.getLogger(__name__)
 

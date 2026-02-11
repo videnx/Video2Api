@@ -40,6 +40,12 @@ from app.models.ixbrowser import (
     SoraJobRequest,
 )
 from app.services.account_dispatch_service import AccountDispatchNoAvailableError, account_dispatch_service
+from app.services.ixbrowser.errors import (
+    IXBrowserAPIError,
+    IXBrowserConnectionError,
+    IXBrowserNotFoundError,
+    IXBrowserServiceError,
+)
 from app.services.task_runtime import spawn
 
 logger = logging.getLogger(__name__)
@@ -88,28 +94,6 @@ IPHONE_UA_POOL = [
     for os_version in IPHONE_OS_VERSIONS
     for build_id in IPHONE_BUILD_IDS
 ]
-
-
-class IXBrowserServiceError(Exception):
-    """ixBrowser 服务通用异常"""
-
-
-class IXBrowserConnectionError(IXBrowserServiceError):
-    """ixBrowser 连接异常"""
-
-
-class IXBrowserAPIError(IXBrowserServiceError):
-    """ixBrowser 业务异常"""
-
-    def __init__(self, code: int, message: str):
-        self.code = code
-        self.message = message
-        super().__init__(f"ixBrowser API error {code}: {message}")
-
-
-class IXBrowserNotFoundError(IXBrowserServiceError):
-    """ixBrowser 资源不存在"""
-
 
 class IXBrowserService:
     """ixBrowser 本地接口封装"""
