@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
@@ -29,24 +30,8 @@ setup_logging()
 logger = logging.getLogger(__name__)
 apply_runtime_settings()
 
-app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    description="Video2Api - ixBrowser + Sora 自动化后端",
-)
-install_exception_handlers(app)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.on_event("startup")
-async def startup_background_services() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     try:
         if sys.platform == "win32":
             loop_type = type(asyncio.get_running_loop()).__name__
@@ -90,34 +75,51 @@ async def startup_background_services() -> None:
         except Exception:  # noqa: BLE001
             pass
 
-
-@app.on_event("shutdown")
-async def shutdown_background_services() -> None:
     try:
-        await account_recovery_scheduler.stop()
-        await scan_scheduler.stop()
-        await worker_runner.stop()
-        sqlite_db.create_event_log(
-            source="system",
-            action="app.shutdown.background_services",
-            event="shutdown",
-            status="success",
-            level="INFO",
-            message="后台 Worker 与调度器已停止",
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("后台服务停止失败")
+        yield
+    finally:
         try:
+            await account_recovery_scheduler.stop()
+            await scan_scheduler.stop()
+            await worker_runner.stop()
             sqlite_db.create_event_log(
                 source="system",
                 action="app.shutdown.background_services",
                 event="shutdown",
-                status="failed",
-                level="WARN",
-                message=f"后台服务停止失败: {exc}",
+                status="success",
+                level="INFO",
+                message="后台 Worker 与调度器已停止",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("后台服务停止失败")
+            try:
+                sqlite_db.create_event_log(
+                    source="system",
+                    action="app.shutdown.background_services",
+                    event="shutdown",
+                    status="failed",
+                    level="WARN",
+                    message=f"后台服务停止失败: {exc}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version=settings.app_version,
+    description="Video2Api - ixBrowser + Sora 自动化后端",
+    lifespan=lifespan,
+)
+install_exception_handlers(app)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.middleware("http")
