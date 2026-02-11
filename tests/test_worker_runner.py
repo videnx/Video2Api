@@ -109,7 +109,7 @@ async def test_worker_run_one_sora_job_clears_lease_after_exception(monkeypatch,
     async def _raise_run(_job_id):
         raise RuntimeError("run failed")
 
-    monkeypatch.setattr("app.services.worker_runner.ixbrowser_service._run_sora_job", _raise_run)
+    monkeypatch.setattr("app.services.worker_runner.ixbrowser_service.run_sora_job", _raise_run)
 
     patches = []
     monkeypatch.setattr(
@@ -127,4 +127,3 @@ async def test_worker_run_one_sora_job_clears_lease_after_exception(monkeypatch,
 
     assert any(call[0] == 88 and "run_last_error" in call[1] for call in patches)
     assert clear_calls and clear_calls[0][0] == 88
-

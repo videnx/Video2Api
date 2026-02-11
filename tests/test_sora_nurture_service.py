@@ -175,6 +175,9 @@ class _FakeIX:
                 return g
         return None
 
+    def playwright_factory(self):
+        return _FakePlaywrightContext()
+
 
 @pytest.mark.asyncio
 async def test_create_batch_creates_jobs(monkeypatch):
@@ -220,8 +223,6 @@ async def test_create_batch_with_targets_creates_multi_group_jobs():
 
 @pytest.mark.asyncio
 async def test_run_batch_skips_active_sora_jobs(monkeypatch):
-    monkeypatch.setattr("app.services.sora_nurture_service.async_playwright", lambda: _FakePlaywrightContext())
-
     fake_db = _FakeDB()
     fake_db.active_map_by_group = {"Sora": {1: 1}}
     service = SoraNurtureService(db=fake_db, ix=_FakeIX())
@@ -238,8 +239,6 @@ async def test_run_batch_skips_active_sora_jobs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_batch_uses_job_group_title(monkeypatch):
-    monkeypatch.setattr("app.services.sora_nurture_service.async_playwright", lambda: _FakePlaywrightContext())
-
     fake_db = _FakeDB()
     service = SoraNurtureService(db=fake_db, ix=_FakeIX())
     req = SoraNurtureBatchCreateRequest(
@@ -277,8 +276,6 @@ async def test_run_batch_uses_job_group_title(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancel_batch_before_run_marks_jobs_canceled(monkeypatch):
-    monkeypatch.setattr("app.services.sora_nurture_service.async_playwright", lambda: _FakePlaywrightContext())
-
     fake_db = _FakeDB()
     service = SoraNurtureService(db=fake_db, ix=_FakeIX())
 
@@ -296,8 +293,6 @@ async def test_cancel_batch_before_run_marks_jobs_canceled(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_batch_updates_totals(monkeypatch):
-    monkeypatch.setattr("app.services.sora_nurture_service.async_playwright", lambda: _FakePlaywrightContext())
-
     fake_db = _FakeDB()
     service = SoraNurtureService(db=fake_db, ix=_FakeIX())
 
@@ -335,8 +330,6 @@ async def test_run_batch_updates_totals(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_batch_job_timeout_fail_fast_and_continue(monkeypatch):
-    monkeypatch.setattr("app.services.sora_nurture_service.async_playwright", lambda: _FakePlaywrightContext())
-
     fake_db = _FakeDB()
     service = SoraNurtureService(db=fake_db, ix=_FakeIX())
     service._job_timeout_seconds = 1

@@ -16,7 +16,6 @@ from uuid import uuid4
 
 import httpx
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
 
 from app.db.sqlite import sqlite_db
 from app.services.task_runtime import spawn
@@ -113,7 +112,7 @@ class SoraPublishWorkflow:
             raise self._connection_error("发布失败：未返回调试地址（ws/debugging_address）")
 
         publish_url = None
-        async with async_playwright() as playwright:
+        async with self.playwright_factory() as playwright:
             browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=20_000)
             try:
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()

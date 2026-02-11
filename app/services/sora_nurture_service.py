@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
 
 from app.db.sqlite import sqlite_db
 from app.models.nurture import SoraNurtureBatchCreateRequest
@@ -357,7 +356,7 @@ class SoraNurtureService:
                 first_error: Optional[str] = None
 
                 active_map_cache: Dict[str, Dict[int, int]] = {}
-                async with async_playwright() as playwright:
+                async with self._ix.playwright_factory() as playwright:
                     for job_row in jobs_to_run:
                         latest_batch = self._db.get_sora_nurture_batch(batch_id) or {}
                         if str(latest_batch.get("status") or "").strip().lower() == "canceled":

@@ -167,7 +167,7 @@ class WorkerRunner:
             metadata={"owner": self.owner, "job_id": job_id},
         )
         try:
-            await ixbrowser_service._run_sora_job(job_id)  # noqa: SLF001
+            await ixbrowser_service.run_sora_job(job_id)
         except Exception as exc:  # noqa: BLE001
             sqlite_db.update_sora_job(job_id, {"run_last_error": str(exc)})
             self._log_event(

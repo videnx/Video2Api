@@ -136,10 +136,7 @@ async def test_scan_group_sora_sessions_collects_results(monkeypatch):
     service._fetch_sora_quota = _fake_fetch_sora_quota
     service._save_scan_response = lambda *_args, **_kwargs: 101
 
-    monkeypatch.setattr(
-        "app.services.ixbrowser_service.async_playwright",
-        lambda: _FakePlaywrightContext(),
-    )
+    service._deps.playwright_factory = lambda: _FakePlaywrightContext()  # noqa: SLF001
     monkeypatch.setattr(
         "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
         lambda _run_id: {"scanned_at": "2026-02-04 12:00:00"},
@@ -234,7 +231,7 @@ async def test_scan_group_sora_sessions_silent_api_uses_curl_when_token_present(
     def _boom_playwright():
         raise AssertionError("不应调用 async_playwright")
 
-    monkeypatch.setattr("app.services.ixbrowser_service.async_playwright", _boom_playwright)
+    service._deps.playwright_factory = _boom_playwright  # noqa: SLF001
 
     async def _boom_scan(*_args, **_kwargs):
         raise AssertionError("不应进入补扫（开窗）")
@@ -360,10 +357,7 @@ async def test_scan_group_sora_sessions_with_profile_ids_only_scans_selected(mon
     service._save_scan_response = lambda *_args, **_kwargs: 201
     service.get_latest_sora_scan = lambda *_args, **_kwargs: baseline
 
-    monkeypatch.setattr(
-        "app.services.ixbrowser_service.async_playwright",
-        lambda: _FakePlaywrightContext(),
-    )
+    service._deps.playwright_factory = lambda: _FakePlaywrightContext()  # noqa: SLF001
     monkeypatch.setattr(
         "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
         lambda _run_id: {"scanned_at": "2026-02-06 12:00:00"},
@@ -404,10 +398,7 @@ async def test_scan_group_sora_sessions_with_profile_ids_not_found(monkeypatch):
 
     service.list_group_windows = _fake_list_group_windows
 
-    monkeypatch.setattr(
-        "app.services.ixbrowser_service.async_playwright",
-        lambda: _FakePlaywrightContext(),
-    )
+    service._deps.playwright_factory = lambda: _FakePlaywrightContext()  # noqa: SLF001
 
     with pytest.raises(IXBrowserNotFoundError):
         await service.scan_group_sora_sessions(group_title="Sora", profile_ids=[999], with_fallback=False)
@@ -470,10 +461,7 @@ async def test_scan_group_sora_sessions_with_profile_ids_without_history_keeps_p
     service._save_scan_response = lambda *_args, **_kwargs: 202
     service.get_latest_sora_scan = lambda *_args, **_kwargs: (_ for _ in ()).throw(IXBrowserNotFoundError("no history"))
 
-    monkeypatch.setattr(
-        "app.services.ixbrowser_service.async_playwright",
-        lambda: _FakePlaywrightContext(),
-    )
+    service._deps.playwright_factory = lambda: _FakePlaywrightContext()  # noqa: SLF001
     monkeypatch.setattr(
         "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
         lambda _run_id: {"scanned_at": "2026-02-06 12:00:00"},
@@ -838,7 +826,7 @@ async def test_scan_group_sora_sessions_does_not_preclose_opened_profiles(monkey
     service._save_scan_response = lambda *_args, **_kwargs: 301
     service._apply_fallback_from_history = lambda _response: None
 
-    monkeypatch.setattr("app.services.ixbrowser_service.async_playwright", lambda: _FakePlaywrightContext())
+    service._deps.playwright_factory = lambda: _FakePlaywrightContext()  # noqa: SLF001
     monkeypatch.setattr(
         "app.services.ixbrowser_service.sqlite_db.get_ixbrowser_scan_run",
         lambda _run_id: {"scanned_at": "2026-02-09 12:00:00"},
@@ -2435,7 +2423,7 @@ async def test_run_sora_submit_and_progress_not_finished_by_pending_missing(monk
     async def _fake_sleep(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr("app.services.ixbrowser.sora_generation_workflow.async_playwright", lambda: _FakePlaywrightContext())
+    service._deps.playwright_factory = lambda: _FakePlaywrightContext()  # noqa: SLF001
     monkeypatch.setattr("app.services.ixbrowser.sora_generation_workflow.asyncio.sleep", _fake_sleep)
     monkeypatch.setattr(workflow, "_open_profile_with_retry", _fake_open_profile, raising=True)
     monkeypatch.setattr(workflow, "_close_profile", _fake_close_profile, raising=True)

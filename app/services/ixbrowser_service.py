@@ -10,6 +10,7 @@ import inspect
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, unquote
@@ -95,6 +96,13 @@ IPHONE_UA_POOL = [
     for build_id in IPHONE_BUILD_IDS
 ]
 
+
+@dataclass
+class IXBrowserServiceDeps:
+    # 可注入依赖，便于 unit test stub/monkeypatch。
+    playwright_factory: Callable[[], Any] = async_playwright
+
+
 class IXBrowserService:
     """ixBrowser 本地接口封装"""
 
@@ -110,10 +118,10 @@ class IXBrowserService:
     sora_job_max_concurrency = 2
     heavy_load_retry_max_attempts = 4
 
-    def __init__(self) -> None:
+    def __init__(self, deps: Optional[IXBrowserServiceDeps] = None) -> None:
+        self._deps = deps or IXBrowserServiceDeps()
         self._ixbrowser_read_semaphore: Optional[asyncio.Semaphore] = None
         self._ixbrowser_write_semaphore: Optional[asyncio.Semaphore] = None
-        self._sora_job_semaphore: Optional[asyncio.Semaphore] = None
         self._group_windows_cache: List[IXBrowserGroupWindows] = []
         self._group_windows_cache_at: float = 0.0
         self._group_windows_cache_ttl: float = 120.0
@@ -141,6 +149,10 @@ class IXBrowserService:
         self._realtime_quota_service.set_cache_ttl(self._realtime_quota_cache_ttl)
         self._sora_job_runner = SoraJobRunner(service=self, db=sqlite_db)
         self.request_timeout_ms = int(self.request_timeout_ms)
+
+    def playwright_factory(self):
+        """对外暴露 Playwright factory（供 workflow/测试复用）。"""
+        return self._deps.playwright_factory()
 
     def register_realtime_subscriber(self) -> asyncio.Queue:
         """对外公开的实时订阅入口（避免外部依赖私有方法）。"""
@@ -216,9 +228,7 @@ class IXBrowserService:
         if self.sora_job_max_concurrency == n_int:
             return
         self.sora_job_max_concurrency = n_int
-        # 若已初始化 semaphore，则重建以应用新并发；运行中的任务不回收。
-        if self._sora_job_semaphore is not None:
-            self._sora_job_semaphore = asyncio.Semaphore(n_int)
+        self._sora_job_runner.set_max_concurrency(n_int)
 
     def _calc_progress_pct(self, processed_windows: int, total_windows: int) -> float:
         processed = max(int(processed_windows or 0), 0)
@@ -2156,7 +2166,7 @@ class IXBrowserService:
                 if should_browser_fallback:
                     logger.info("静默更新 | profile_id=%s | 进入补扫（将打开窗口抓取）", int(profile_id))
                     if playwright is None:
-                        playwright_cm = async_playwright()
+                        playwright_cm = self.playwright_factory()
                         playwright = await playwright_cm.__aenter__()
                     try:
                         item = await self._scan_single_window_via_browser(
@@ -2385,7 +2395,7 @@ class IXBrowserService:
 
         scanned_items: Dict[int, IXBrowserSessionScanItem] = {}
 
-        async with async_playwright() as playwright:
+        async with self.playwright_factory() as playwright:
             for window in windows_to_scan:
                 started_at = time.perf_counter()
                 close_success = False
@@ -3120,6 +3130,10 @@ class IXBrowserService:
             raise IXBrowserNotFoundError(f"未找到任务：{job_id}")
         events = sqlite_db.list_sora_job_events(job_id)
         return [SoraJobEvent(**event) for event in events]
+
+    async def run_sora_job(self, job_id: int) -> None:
+        """对外公开执行入口（避免外部依赖私有方法）。"""
+        await self._sora_job_runner.run_sora_job(job_id)
 
     async def _run_sora_job(self, job_id: int) -> None:
         await self._sora_job_runner.run_sora_job(job_id)

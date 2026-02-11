@@ -19,16 +19,27 @@ class SoraJobRunner:
     def __init__(self, service, db=sqlite_db) -> None:
         self._service = service
         self._db = db
+        self._max_concurrency = max(1, int(getattr(service, "sora_job_max_concurrency", 2) or 2))
+        self._semaphore: Optional[asyncio.Semaphore] = None
+
+    def set_max_concurrency(self, n: int) -> None:
+        n_int = max(1, int(n))
+        if self._max_concurrency == n_int:
+            return
+        self._max_concurrency = n_int
+        if self._semaphore is not None:
+            # 运行中的任务不回收，仅对后续任务生效。
+            self._semaphore = asyncio.Semaphore(n_int)
 
     def _service_error(self, message: str) -> Exception:
         err_cls = getattr(self._service, "_service_error_cls", RuntimeError)
         return err_cls(message)
 
     async def run_sora_job(self, job_id: int) -> None:
-        if self._service._sora_job_semaphore is None:  # noqa: SLF001
-            self._service._sora_job_semaphore = asyncio.Semaphore(self._service.sora_job_max_concurrency)  # noqa: SLF001
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._max_concurrency)
 
-        async with self._service._sora_job_semaphore:  # noqa: SLF001
+        async with self._semaphore:
             row = self._db.get_sora_job(job_id)
             if not row:
                 return

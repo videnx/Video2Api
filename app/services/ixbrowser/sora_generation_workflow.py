@@ -8,8 +8,6 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
-from playwright.async_api import async_playwright
-
 from app.db.sqlite import sqlite_db
 
 logger = logging.getLogger(__name__)
@@ -74,7 +72,7 @@ class SoraGenerationWorkflow:
         last_progress = 0
         last_draft_fetch_at = 0.0
 
-        async with async_playwright() as playwright:
+        async with self.playwright_factory() as playwright:
             browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=20_000)
             try:
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
@@ -264,7 +262,7 @@ class SoraGenerationWorkflow:
         last_progress = 0
         last_draft_fetch_at = 0.0
 
-        async with async_playwright() as playwright:
+        async with self.playwright_factory() as playwright:
             browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=20_000)
             try:
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
@@ -511,7 +509,7 @@ class SoraGenerationWorkflow:
         access_token: Optional[str] = None
 
         try:
-            async with async_playwright() as playwright:
+            async with self.playwright_factory() as playwright:
                 browser = await playwright.chromium.connect_over_cdp(ws_endpoint, timeout=20_000)
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
                 page = context.pages[0] if context.pages else await context.new_page()
@@ -939,7 +937,7 @@ class SoraGenerationWorkflow:
             except Exception:  # noqa: BLE001
                 logger.info("获取 genid 连接成功: profile=%s task_id=%s", profile_id, task_id)
 
-        async with async_playwright() as playwright:
+        async with self.playwright_factory() as playwright:
             while time.monotonic() < deadline:
                 try:
                     if page is None or page.is_closed():
