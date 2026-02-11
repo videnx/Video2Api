@@ -42,7 +42,7 @@ def test_silent_refresh_create_reused_and_get_job(client, monkeypatch):
         coro.close()
         return object()
 
-    monkeypatch.setattr("app.services.ixbrowser_service.spawn", _fake_spawn)
+    monkeypatch.setattr("app.services.ixbrowser.silent_refresh.spawn", _fake_spawn)
 
     first = client.post(
         "/api/v1/ixbrowser/sora-session-accounts/silent-refresh",
@@ -98,4 +98,3 @@ def test_fail_running_silent_refresh_jobs_marks_failed(temp_db):
     assert queued_row["finished_at"]
     assert running_row["finished_at"]
     assert completed_row["status"] == "completed"
-

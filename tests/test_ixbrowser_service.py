@@ -1450,7 +1450,7 @@ async def test_retry_sora_watermark_resets_state_and_schedules(monkeypatch):
         coro.close()
         return None
 
-    monkeypatch.setattr("app.services.ixbrowser_service.spawn", _fake_spawn)
+    monkeypatch.setattr("app.services.ixbrowser.sora_jobs.spawn", _fake_spawn)
     service.get_sora_job = lambda _job_id: SimpleNamespace(job_id=job_id)
 
     result = await service.retry_sora_watermark(job_id)
